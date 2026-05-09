@@ -1,6 +1,8 @@
 use std::io::{self, Stdout};
+use std::time::{Instant, Duration};
 use crossterm::event::KeyEventKind;
 use noise::{NoiseFn, Perlin};
+use rand::Rng;
 use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
@@ -28,6 +30,8 @@ pub struct App {
     height: usize,
     base_pos: (u16, u16), 
     robots: Vec<Robot>,
+    last_tick: Instant,       
+    tick_rate: Duration,      // <-- add
 }
 
 pub struct Robot {
@@ -51,6 +55,8 @@ impl App {
             height,
             base_pos,
             robots: vec![Robot::new((base_pos.0 + 5, base_pos.1))], // Example robot starting near the base
+            last_tick: Instant::now(),
+            tick_rate: Duration::from_millis(200), // 100 ms per tick
         }
     }
 
@@ -68,15 +74,28 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
-        while !self.exit {
-            terminal.draw(|frame: &mut ratatui::Frame<'_>| self.draw(frame))?;
+    while !self.exit {
+        terminal.draw(|frame: &mut ratatui::Frame<'_>| self.draw(frame))?;
 
-            // Read events AFTER drawing so the first frame is visible immediately
+        // Temps restant avant le prochain tick
+        let timeout = self.tick_rate
+            .checked_sub(self.last_tick.elapsed())
+            .unwrap_or(Duration::ZERO);
+
+        // poll() bloque AU MAXIMUM jusqu'au prochain tick, puis rend la main
+        if crossterm::event::poll(timeout)? {
             match crossterm::event::read()? {
                 crossterm::event::Event::Key(key_event) => self.handle_key_event(key_event)?,
                 _ => {}
             }
         }
+
+        // Déplacer les robots à chaque tick
+        if self.last_tick.elapsed() >= self.tick_rate {
+            self.move_robots_randomly();
+            self.last_tick = Instant::now();
+        }
+    }
 
         Ok(())
     }
@@ -90,6 +109,26 @@ impl App {
             self.exit = true;
         }
         Ok(())
+    }
+
+    fn move_robots_randomly(&mut self) {
+        let mut rng = rand::thread_rng();
+        let w = self.width as u16;
+        let h = self.height as u16;
+
+        for robot in &mut self.robots {
+            // Pick a random direction: 0=up 1=down 2=left 3=right
+            let (dx, dy): (i16, i16) = match rng.gen_range(0..4) {
+                0 => ( 0, -1),
+                1 => ( 0,  1),
+                2 => (-1,  0),
+                _ => ( 1,  0),
+            };
+
+            let nx = (robot.position.0 as i16 + dx).clamp(1, w as i16 - 2) as u16;
+            let ny = (robot.position.1 as i16 + dy).clamp(1, h as i16 - 2) as u16;
+            robot.position = (nx, ny);
+        }
     }
 }
 
@@ -203,3 +242,4 @@ fn is_base_cell(x: u16, y: u16, pos: (u16, u16)) -> bool {
 
     x >= x_min && x <= x_max && y >= y_min && y <= y_max
 }
+
