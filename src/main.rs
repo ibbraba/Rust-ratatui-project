@@ -27,16 +27,30 @@ pub struct App {
     width: usize,
     height: usize,
     base_pos: (u16, u16), 
+    robots: Vec<Robot>,
+}
+
+pub struct Robot {
+    pub position: (u16, u16),
+}
+
+impl Robot {
+    pub fn new(position: (u16, u16)) -> Self {
+        Self { position }
+    }
+    
 }
 
 impl App {
     pub fn new(width: usize, height: usize) -> Self {
+        let base_pos = (width as u16 / 2, height as u16 / 2);
         Self {
             exit: false,
             map: Self::generate_map(width, height),
             width,
             height,
-            base_pos: (width as u16 / 2, height as u16 / 2),
+            base_pos,
+            robots: vec![Robot::new((base_pos.0 + 5, base_pos.1))], // Example robot starting near the base
         }
     }
 
@@ -122,6 +136,16 @@ impl Widget for &App {
         Line::from("Robots Game — Appuyez sur n'importe quelle touche pour quitter")
             .bold().yellow()
             .render(area, buf);
+
+        //Render les robots
+        for robot in &self.robots {
+            let (rx, ry) = robot.position;
+            if rx < area.width && ry < area.height {
+                buf[(area.x + rx, area.y + ry)]
+                    .set_symbol("X")
+                    .set_style(Style::default().fg(Color::LightRed).bold());
+            }
+        }
     }
 }
 
