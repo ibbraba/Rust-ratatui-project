@@ -37,13 +37,36 @@ pub struct App {
 
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum RobotType {
+    Scout,
+    Collector,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum RobotState {
+    Exploring,
+    Collecting,
+    ReturningToBase,
+    Idle,
+}
+
 pub struct Robot {
     pub position: (u16, u16),
+    pub robot_type: RobotType,
+    pub state: RobotState,
+    pub carried_crystals: u32,
 }
 
 impl Robot {
-    pub fn new(position: (u16, u16)) -> Self {
-        Self { position }
+    pub fn new(position: (u16, u16), robot_type: RobotType) -> Self {
+        Self {
+            position,
+            robot_type,
+            // Les robots commencent en mode exploration par défaut
+            state: RobotState::Exploring,
+            carried_crystals: 0,
+        }
     }
     
 }
@@ -57,7 +80,13 @@ impl App {
             width,
             height,
             base_pos,
-            robots: vec![Robot::new((base_pos.0 + 5, base_pos.1))], // Example robot starting near the base
+            robots: vec![
+                Robot::new((base_pos.0 + 5, base_pos.1), RobotType::Scout),
+                Robot::new((base_pos.0 + 7, base_pos.1), RobotType::Scout),
+
+                Robot::new((base_pos.0 - 5, base_pos.1), RobotType::Collector),
+                Robot::new((base_pos.0 - 7, base_pos.1), RobotType::Collector),
+            ], // Example robot starting near the base
             last_tick: Instant::now(),
             tick_rate: Duration::from_millis(200), // 100 ms per tick
             collected_crystals: HashSet::new(),
@@ -198,12 +227,15 @@ impl Widget for &App {
         //Render les robots
         for robot in &self.robots {
             let (rx, ry) = robot.position;
-            if rx < area.width && ry < area.height {
-                buf[(area.x + rx, area.y + ry)]
-                    .set_symbol("X")
-                    .set_style(Style::default().fg(Color::LightRed).bold());
+            let (symbol, color) = match robot.robot_type {
+                RobotType::Scout => ("X", Color::LightRed),
+                RobotType::Collector => ("o", Color::Magenta),
+            };
+
+            buf[(area.x + rx, area.y + ry)]
+                .set_symbol(symbol)
+                .set_style(Style::default().fg(color).bold());
             }
-        }
     }
 }
 
