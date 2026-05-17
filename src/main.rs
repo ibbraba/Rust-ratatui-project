@@ -95,7 +95,7 @@ impl App {
 
     fn generate_map(width: usize, height: usize) -> Vec<Vec<f64>> {
         let perlin = Perlin::new(42);
-        let scale = 0.1;
+        let scale = 0.09;
 
         (0..height)
             .map(|y| {
@@ -125,7 +125,7 @@ impl App {
 
         // Déplacer les robots à chaque tick
         if self.last_tick.elapsed() >= self.tick_rate {
-            self.move_robots_randomly();
+            self.update_robots();
             self.last_tick = Instant::now();
         }
     }
@@ -144,33 +144,37 @@ impl App {
         Ok(())
     }
 
-    fn move_robots_randomly(&mut self) {
-        let mut rng = rand::thread_rng();
-        let w = self.width as u16;
-        let h = self.height as u16;
+   fn update_robots(&mut self) {
+    let mut rng = rand::thread_rng();
 
-        for robot in &mut self.robots {
-            // Pick a random direction: 0=up 1=down 2=left 3=right
-            let (dx, dy): (i16, i16) = match rng.gen_range(0..4) {
-                0 => ( 0, -1),
-                1 => ( 0,  1),
-                2 => (-1,  0),
-                _ => ( 1,  0),
-            };
-
-            let nx = (robot.position.0 as i16 + dx).clamp(1, w as i16 - 2) as u16;
-            let ny = (robot.position.1 as i16 + dy).clamp(1, h as i16 - 2) as u16;
-            if !is_obstacle(&self.map, nx, ny) && !is_base_cell(nx, ny, self.base_pos) {
-                robot.position = (nx, ny);
-
-                // Only collect if the robot actually moved there
-                if is_crystal(&self.map, nx, ny) {
-                    self.collected_crystals.insert((nx, ny));
-                }
+    for robot in &mut self.robots {
+        match robot.robot_type {
+            RobotType::Scout => {
+                move_scout(
+                    robot,
+                    &self.map,
+                    self.width,
+                    self.height,
+                    self.base_pos,
+                    &mut rng,
+                );
             }
 
+            RobotType::Collector => {
+                if let Some(pos) = move_collector(
+                    robot,
+                    &self.map,
+                    self.width,
+                    self.height,
+                    self.base_pos,
+                    &mut rng,
+                ) {
+                    self.collected_crystals.insert(pos);
+                }
+            }
         }
     }
+}
 }
 
 impl Widget for &App {
@@ -307,4 +311,69 @@ fn is_obstacle(map: &Vec<Vec<f64>>, x: u16, y: u16) -> bool {
 fn is_crystal(map: &Vec<Vec<f64>>, x: u16, y: u16) -> bool {
     let v = map_value(map, x, y);
     v >= -0.1 && v < 0.0
+}
+
+
+fn move_scout(
+    robot: &mut Robot,
+    map: &Vec<Vec<f64>>,
+    width: usize,
+    height: usize,
+    base_pos: (u16, u16),
+    rng: &mut rand::rngs::ThreadRng,
+) {
+    let directions = [(0,-1), (0,1), (-1,0), (1,0)];
+
+    for _ in 0..4 {
+        let (dx, dy) = directions[rng.gen_range(0..4)];
+
+        let nx = (robot.position.0 as i16 + dx)
+            .clamp(1, width as i16 - 2) as u16;
+
+        let ny = (robot.position.1 as i16 + dy)
+            .clamp(1, height as i16 - 2) as u16;
+
+        if !is_obstacle(map, nx, ny)
+            && !is_base_cell(nx, ny, base_pos)
+        {
+            robot.position = (nx, ny);
+            break;
+        }
+    }
+}
+
+
+fn move_collector(
+    robot: &mut Robot,
+    map: &Vec<Vec<f64>>,
+    width: usize,
+    height: usize,
+    base_pos: (u16, u16),
+    rng: &mut rand::rngs::ThreadRng,
+) -> Option<(u16, u16)> {
+    let directions = [(0,-1), (0,1), (-1,0), (1,0)];
+
+    for _ in 0..4 {
+        let (dx, dy) = directions[rng.gen_range(0..4)];
+
+        let nx = (robot.position.0 as i16 + dx)
+            .clamp(1, width as i16 - 2) as u16;
+
+        let ny = (robot.position.1 as i16 + dy)
+            .clamp(1, height as i16 - 2) as u16;
+
+        if !is_obstacle(map, nx, ny)
+            && !is_base_cell(nx, ny, base_pos)
+        {
+            robot.position = (nx, ny);
+
+            if is_crystal(map, nx, ny) {
+                robot.carried_crystals += 1;
+                return Some((nx, ny));
+            }
+
+            break;
+        }
+    }
+    None
 }
