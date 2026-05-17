@@ -1,5 +1,6 @@
 use std::io::{self, Stdout};
 use std::time::{Instant, Duration};
+use std::collections::HashSet;
 use crossterm::event::KeyEventKind;
 use noise::{NoiseFn, Perlin};
 use rand::Rng;
@@ -32,6 +33,8 @@ pub struct App {
     robots: Vec<Robot>,
     last_tick: Instant,       
     tick_rate: Duration,      // <-- add
+    collected_crystals: HashSet<(u16, u16)>,  // <-- add
+
 }
 
 pub struct Robot {
@@ -57,12 +60,13 @@ impl App {
             robots: vec![Robot::new((base_pos.0 + 5, base_pos.1))], // Example robot starting near the base
             last_tick: Instant::now(),
             tick_rate: Duration::from_millis(200), // 100 ms per tick
+            collected_crystals: HashSet::new(),
         }
     }
 
     fn generate_map(width: usize, height: usize) -> Vec<Vec<f64>> {
         let perlin = Perlin::new(42);
-        let scale = 0.08;
+        let scale = 0.1;
 
         (0..height)
             .map(|y| {
@@ -127,7 +131,15 @@ impl App {
 
             let nx = (robot.position.0 as i16 + dx).clamp(1, w as i16 - 2) as u16;
             let ny = (robot.position.1 as i16 + dy).clamp(1, h as i16 - 2) as u16;
-            robot.position = (nx, ny);
+            if !is_obstacle(&self.map, nx, ny) && !is_base_cell(nx, ny, self.base_pos) {
+                robot.position = (nx, ny);
+
+                // Only collect if the robot actually moved there
+                if is_crystal(&self.map, nx, ny) {
+                    self.collected_crystals.insert((nx, ny));
+                }
+            }
+
         }
     }
 }
@@ -156,11 +168,18 @@ impl Widget for &App {
                 //Render les cristaux et l'energie en fonction du compteur restant
 
 
-                let map_y = y % self.height;
-                let map_x = x % self.width;
-                let value = self.map[map_y][map_x];
+                if y >= self.height || x >= self.width {
+                    continue;
+                }
 
-                let (symbol, color) = render_cell(value);
+                let value = self.map[y][x];
+
+               let (symbol, color) = if self.collected_crystals.contains(&(x as u16, y as u16)) 
+                {
+                    (" ", Color::DarkGray)
+                } else {
+                    render_cell(value)
+                };
 
                 buf[(area.x + x as u16, area.y + y as u16)]
                     .set_symbol(symbol)
@@ -193,10 +212,10 @@ fn render_cell(value: f64) -> (&'static str, Color) {
     
     match value {
     
-        v if v < -0.1 => ("0", Color::Cyan),
-        v if v <  0.0 => (".", Color::Yellow),
+        v if v < -0.1 => ("O", Color::Cyan),
+        v if v <  0.0 => ("C", Color::Yellow),
         v if v <  0.5 => (" ", Color::DarkGray),
-        _             => ("", Color::White),
+        _             => (" ", Color::White),
     }
 }
 
@@ -243,3 +262,17 @@ fn is_base_cell(x: u16, y: u16, pos: (u16, u16)) -> bool {
     x >= x_min && x <= x_max && y >= y_min && y <= y_max
 }
 
+fn map_value(map: &Vec<Vec<f64>>, x: u16, y: u16) -> f64 {
+    let map_y = y as usize % map.len();
+    let map_x = x as usize % map[0].len();
+    map[map_y][map_x]
+}
+
+fn is_obstacle(map: &Vec<Vec<f64>>, x: u16, y: u16) -> bool {
+    map_value(map, x, y) < -0.1
+}
+
+fn is_crystal(map: &Vec<Vec<f64>>, x: u16, y: u16) -> bool {
+    let v = map_value(map, x, y);
+    v >= -0.1 && v < 0.0
+}
