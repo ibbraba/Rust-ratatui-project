@@ -1,6 +1,6 @@
 use std::io::{self, Stdout};
 use std::time::{Instant, Duration};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque, HashMap};
 use crossterm::event::KeyEventKind;
 use noise::{NoiseFn, Perlin};
 use rand::Rng;
@@ -34,7 +34,7 @@ pub struct App {
     last_tick: Instant,       
     tick_rate: Duration,      // <-- add
     collected_crystals: HashSet<(u16, u16)>,  // <-- add
-
+    discovered_crystals: HashSet<(u16, u16)>, // Cristaux découverts par les scouts, base de savoir de tous les robots
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -56,6 +56,7 @@ pub struct Robot {
     pub robot_type: RobotType,
     pub state: RobotState,
     pub carried_crystals: u32,
+    pub path: VecDeque<(u16, u16)>,
 }
 
 impl Robot {
@@ -66,6 +67,8 @@ impl Robot {
             // Les robots commencent en mode exploration par défaut
             state: RobotState::Exploring,
             carried_crystals: 0,
+            path: VecDeque::new(),
+
         }
     }
     
@@ -90,6 +93,7 @@ impl App {
             last_tick: Instant::now(),
             tick_rate: Duration::from_millis(200), // 100 ms per tick
             collected_crystals: HashSet::new(),
+            discovered_crystals: HashSet::new(),
         }
     }
 
@@ -144,37 +148,111 @@ impl App {
         Ok(())
     }
 
-   fn update_robots(&mut self) {
+  fn update_robots(&mut self) {
     let mut rng = rand::thread_rng();
+    let mut newly_discovered: Vec<(u16, u16)> = vec![];
 
     for robot in &mut self.robots {
         match robot.robot_type {
+
             RobotType::Scout => {
-                move_scout(
-                    robot,
-                    &self.map,
-                    self.width,
-                    self.height,
-                    self.base_pos,
-                    &mut rng,
-                );
+                // Move randomly, report any crystal found
+                move_scout(robot, &self.map, self.width, self.height, self.base_pos, &mut rng);
+
+                let (rx, ry) = robot.position;
+                if is_crystal(&self.map, rx, ry)
+                    && !self.collected_crystals.contains(&(rx, ry))
+                    && !self.discovered_crystals.contains(&(rx, ry))
+                {
+                    newly_discovered.push((rx, ry));
+                }
             }
 
             RobotType::Collector => {
-                if let Some(pos) = move_collector(
-                    robot,
-                    &self.map,
-                    self.width,
-                    self.height,
-                    self.base_pos,
-                    &mut rng,
-                ) {
-                    self.collected_crystals.insert(pos);
+                if let Some(next) = robot.path.pop_front() {
+                    robot.position = next;
+
+                    // Collect any crystal stepped on, whether it was the target or not
+                    if is_crystal(&self.map, next.0, next.1)
+                        && !self.collected_crystals.contains(&next)
+                    {
+                        robot.carried_crystals += 1;
+                        self.collected_crystals.insert(next);
+                        self.discovered_crystals.remove(&next);
+
+                        // If this was the target (path now empty), go back to exploring
+                        // If not the target, keep following the path to the original target
+                        if robot.path.is_empty() {
+                            robot.state = RobotState::ReturningToBase;
+                        }
+                    }
+                } else {
+                    robot.state = RobotState::Exploring;
+                    move_scout(robot, &self.map, self.width, self.height, self.base_pos, &mut rng);
+
+                    // Also collect while wandering randomly
+                    let (rx, ry) = robot.position;
+                    if is_crystal(&self.map, rx, ry)
+                        && !self.collected_crystals.contains(&(rx, ry))
+                    {
+                        robot.carried_crystals += 1;
+                        self.collected_crystals.insert((rx, ry));
+                        self.discovered_crystals.remove(&(rx, ry));
+                    }
                 }
             }
         }
     }
-}
+
+    // Register newly found crystals
+    for pos in newly_discovered {
+        self.discovered_crystals.insert(pos);
+    }
+
+    // Assign unoccupied collectors to known crystals
+    self.assign_collectors();
+    }
+
+    fn assign_collectors(&mut self) {
+    // Build list of crystals not yet targeted by a collector
+    let targeted: HashSet<(u16, u16)> = self.robots.iter()
+        .filter(|r| r.robot_type == RobotType::Collector && !r.path.is_empty())
+        .filter_map(|r| r.path.back().copied())
+        .collect();
+
+    let available_crystals: Vec<(u16, u16)> = self.discovered_crystals
+        .iter()
+        .filter(|pos| !self.collected_crystals.contains(pos) && !targeted.contains(pos))
+        .copied()
+        .collect();
+
+    for robot in &mut self.robots {
+        if robot.robot_type != RobotType::Collector || !robot.path.is_empty() {
+            continue;
+        }
+
+        // Find the closest available crystal
+        if let Some(&target) = available_crystals.iter().min_by_key(|&&(cx, cy)| {
+            let dx = cx as i32 - robot.position.0 as i32;
+            let dy = cy as i32 - robot.position.1 as i32;
+            dx * dx + dy * dy
+        }) {
+            let path = bfs(
+                &self.map,
+                &self.collected_crystals,
+                robot.position,
+                target,
+                self.width,
+                self.height,
+                self.base_pos,
+            );
+            if !path.is_empty() {
+                robot.path = path;
+                robot.state = RobotState::Collecting;
+            }
+        }
+    }
+    }
 }
 
 impl Widget for &App {
@@ -207,9 +285,10 @@ impl Widget for &App {
 
                 let value = self.map[y][x];
 
-               let (symbol, color) = if self.collected_crystals.contains(&(x as u16, y as u16)) 
-                {
+               let (symbol, color) = if self.collected_crystals.contains(&(x as u16, y as u16)) {
                     (" ", Color::DarkGray)
+                } else if self.discovered_crystals.contains(&(x as u16, y as u16)) {
+                    ("C", Color::LightYellow)  // brighter = known to all robots
                 } else {
                     render_cell(value)
                 };
@@ -377,3 +456,48 @@ fn move_collector(
     }
     None
 }
+
+fn bfs(
+    map: &Vec<Vec<f64>>,
+    collected: &HashSet<(u16, u16)>,
+    from: (u16, u16),
+    to: (u16, u16),
+    width: usize,
+    height: usize,
+    base_pos: (u16, u16),
+) -> VecDeque<(u16, u16)> {
+    let mut visited: HashSet<(u16, u16)> = HashSet::new();
+    let mut queue: VecDeque<(u16, u16, Vec<(u16, u16)>)> = VecDeque::new();
+
+    queue.push_back((from.0, from.1, vec![]));
+    visited.insert(from);
+
+    while let Some((x, y, path)) = queue.pop_front() {
+        if (x, y) == to {
+            return path.into();
+        }
+
+        for (dx, dy) in [(0i16,-1),(0,1),(-1,0),(1,0)] {
+            let nx = (x as i16 + dx).clamp(1, width as i16 - 2) as u16;
+            let ny = (y as i16 + dy).clamp(1, height as i16 - 2) as u16;
+
+            if visited.contains(&(nx, ny)) {
+                continue;
+            }
+            // Allow passage through collected crystal spots (now empty ground)
+            let passable = !is_obstacle(map, nx, ny)
+                && (!is_base_cell(nx, ny, base_pos) || (nx, ny) == to)
+                && !collected.contains(&(nx, ny)).then(|| false).unwrap_or(false);
+
+            if passable {
+                visited.insert((nx, ny));
+                let mut new_path = path.clone();
+                new_path.push((nx, ny));
+                queue.push_back((nx, ny, new_path));
+            }
+        }
+    }
+
+    VecDeque::new() // no path found
+}
+
