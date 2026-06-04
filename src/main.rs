@@ -84,11 +84,10 @@ impl App {
             height,
             base_pos,
             robots: vec![
-                Robot::new((base_pos.0 + 5, base_pos.1), RobotType::Scout),
-                Robot::new((base_pos.0 + 7, base_pos.1), RobotType::Scout),
-
-                Robot::new((base_pos.0 - 5, base_pos.1), RobotType::Collector),
-                Robot::new((base_pos.0 - 7, base_pos.1), RobotType::Collector),
+                Robot::new((base_pos.0 + 11, base_pos.1), RobotType::Scout),
+                Robot::new((base_pos.0 + 13, base_pos.1), RobotType::Scout),
+                Robot::new((base_pos.0 - 11, base_pos.1), RobotType::Collector),
+                Robot::new((base_pos.0 - 13, base_pos.1), RobotType::Collector),
             ], // Example robot starting near the base
             last_tick: Instant::now(),
             tick_rate: Duration::from_millis(200), // 100 ms per tick
@@ -99,7 +98,7 @@ impl App {
 
     fn generate_map(width: usize, height: usize) -> Vec<Vec<f64>> {
         let perlin = Perlin::new(42);
-        let scale = 0.09;
+        let scale = 0.11;
 
         (0..height)
             .map(|y| {
@@ -368,11 +367,10 @@ fn render_base(pos: (u16, u16), area: Rect, buf: &mut ratatui::prelude::Buffer) 
 
 fn is_base_cell(x: u16, y: u16, pos: (u16, u16)) -> bool {
     let (bx, by) = pos;
-    //Valeur pour une base 3x3, changer si la taille de la base change
-    let x_min = bx.saturating_sub(2);
-    let y_min = by.saturating_sub(2);
-    let x_max = bx + 5;
-    let y_max = by + 5;
+    let x_min = bx.saturating_sub(10);
+    let y_min = by.saturating_sub(10);
+    let x_max = bx + 10;
+    let y_max = by + 10;
 
     x >= x_min && x <= x_max && y >= y_min && y <= y_max
 }
