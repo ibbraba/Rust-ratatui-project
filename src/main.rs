@@ -89,8 +89,14 @@ impl App {
             robots: vec![
                 Robot::new((base_pos.0 + 11, base_pos.1), RobotType::Scout),
                 Robot::new((base_pos.0 + 13, base_pos.1), RobotType::Scout),
+                Robot::new((base_pos.0 + 33, base_pos.1), RobotType::Scout),
+                Robot::new((base_pos.0 + 25, base_pos.1), RobotType::Scout),
+
                 Robot::new((base_pos.0 - 11, base_pos.1), RobotType::Collector),
                 Robot::new((base_pos.0 - 13, base_pos.1), RobotType::Collector),
+                Robot::new((base_pos.0 - 15, base_pos.1), RobotType::Collector),
+                Robot::new((base_pos.0 - 17, base_pos.1), RobotType::Collector),
+
             ], // Example robot starting near the base
             last_tick: Instant::now(),
             tick_rate: Duration::from_millis(200), // 100 ms per tick
@@ -104,7 +110,7 @@ impl App {
 
     fn generate_map(width: usize, height: usize) -> Vec<Vec<f64>> {
         let perlin = Perlin::new(42);
-        let scale = 0.11;
+        let scale = 0.05;
 
         (0..height)
             .map(|y| {
@@ -244,57 +250,56 @@ impl App {
     }
 
     fn assign_collectors(&mut self) {
+    let mut already_targeted: HashSet<(u16, u16)> = self.robots.iter()
+        .filter(|r| r.robot_type == RobotType::Collector && !r.path.is_empty())
+        .filter_map(|r| r.path.back().copied())
+        .collect();
 
-        let targeted: HashSet<(u16, u16)> = self.robots.iter()
-            .filter(|r| r.robot_type == RobotType::Collector && !r.path.is_empty())
-            .filter_map(|r| r.path.back().copied())
-            .collect();
+    let available_crystals = self.discovered_crystals.iter()
+        .filter(|p| !self.collected_crystals.contains(p) && !already_targeted.contains(p))
+        .copied();
 
-        // Merge crystals and energy into one target list
-        let available_crystals: Vec<(u16, u16)> = self.discovered_crystals
-            .iter()
-            .filter(|p| !self.collected_crystals.contains(p) && !targeted.contains(p))
-            .copied()
-            .collect();
+    let available_energy = self.discovered_energy.iter()
+        .filter(|p| !self.collected_energy.contains(p) && !already_targeted.contains(p))
+        .copied();
 
-        let available_energy: Vec<(u16, u16)> = self.discovered_energy
-            .iter()
-            .filter(|p| !self.collected_energy.contains(p) && !targeted.contains(p))
-            .copied()
-            .collect();
+    let mut all_targets: Vec<(u16, u16)> = available_crystals.chain(available_energy).collect();
 
-        // Combine both into one pool
-        let all_targets: Vec<(u16, u16)> = available_crystals
-            .into_iter()
-            .chain(available_energy)
-            .collect();
+    for robot in &mut self.robots {
+        if robot.robot_type != RobotType::Collector || !robot.path.is_empty() {
+            continue;
+        }
 
-        for robot in &mut self.robots {
-            if robot.robot_type != RobotType::Collector || !robot.path.is_empty() {
-                continue;
-            }
-
-            if let Some(&target) = all_targets.iter().min_by_key(|&&(cx, cy)| {
-                let dx = cx as i32 - robot.position.0 as i32;
-                let dy = cy as i32 - robot.position.1 as i32;
+        // Trouve le robot le mieux placé
+       let best_placed = all_targets.iter()
+            .enumerate()
+            .min_by_key(|(_, pos)| {
+                let dx = pos.0 as i32 - robot.position.0 as i32;
+                let dy = pos.1 as i32 - robot.position.1 as i32;
                 dx * dx + dy * dy
-            }) {
-                let path = bfs(
-                    &self.map,
-                    &self.collected_crystals,
-                    &self.collected_energy,   // <-- add
-                    robot.position,
-                    target,
-                    self.width,
-                    self.height,
-                    self.base_pos,
-                );
-                if !path.is_empty() {
-                    robot.path = path;
-                    robot.state = RobotState::Collecting;
-                }
+            })
+            .map(|(i, pos)| (i, *pos));
+
+        if let Some((idx, target)) = best_placed {
+            let path = bfs(
+                &self.map,
+                &self.collected_crystals,
+                &self.collected_energy,
+                robot.position,
+                target,
+                self.width,
+                self.height,
+                self.base_pos,
+            );
+            if !path.is_empty() {
+                robot.path = path;
+                robot.state = RobotState::Collecting;
+                // Remove so the next collector picks a different target
+                all_targets.remove(idx);
+                already_targeted.insert(target);
             }
         }
+    }
     }
 }
 
@@ -353,6 +358,27 @@ impl Widget for &App {
         Line::from("Robots Game — Appuyez sur n'importe quelle touche pour quitter")
             .bold().yellow()
             .render(area, buf);
+
+        // Summary at the bottom
+        let summary = format!(
+            " Cristaux collectés: {}  |  Énergie collectée: {}  |  Cristaux découverts: {}  |  Énergie découverte: {} ",
+            self.collected_crystals.len(),
+            self.collected_energy.len(),
+            self.discovered_crystals.len(),
+            self.discovered_energy.len(),
+        );
+
+        let bottom_area = Rect {
+            x: area.x,
+            y: area.y + area.height - 1,  // last row
+            width: area.width,
+            height: 1,
+        };
+
+        Line::from(summary)
+            .bold().light_blue()
+            .centered()
+            .render(bottom_area, buf);
 
         //Render les robots
         for robot in &self.robots {
