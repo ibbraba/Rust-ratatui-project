@@ -10,6 +10,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui::Terminal;
 use ratatui::prelude::Rect;
+use rand::seq::SliceRandom;
 
 
 fn main() -> io::Result<()> {
@@ -60,10 +61,11 @@ pub struct Robot {
     pub state: RobotState,
     pub carried_crystals: u32,
     pub path: VecDeque<(u16, u16)>,
+    pub preferred_dir: (i16, i16),
 }
 
 impl Robot {
-    pub fn new(position: (u16, u16), robot_type: RobotType) -> Self {
+    pub fn new(position: (u16, u16), robot_type: RobotType, preferred_dir: (i16, i16)) -> Self {
         Self {
             position,
             robot_type,
@@ -71,7 +73,7 @@ impl Robot {
             state: RobotState::Exploring,
             carried_crystals: 0,
             path: VecDeque::new(),
-
+            preferred_dir: (0, 0),
         }
     }
     
@@ -80,6 +82,12 @@ impl Robot {
 impl App {
     pub fn new(width: usize, height: usize) -> Self {
         let base_pos = (width as u16 / 2, height as u16 / 2);
+
+        let spawn = |dx: i16, dy: i16| -> (u16, u16) {
+        let x = (base_pos.0 as i16 + dx).clamp(1, width as i16 - 2) as u16;
+        let y = (base_pos.1 as i16 + dy).clamp(1, height as i16 - 2) as u16;
+        (x, y)
+    };
         Self {
             exit: false,
             map: Self::generate_map(width, height),
@@ -87,19 +95,18 @@ impl App {
             height,
             base_pos,
             robots: vec![
-                Robot::new((base_pos.0 + 11, base_pos.1), RobotType::Scout),
-                Robot::new((base_pos.0 + 13, base_pos.1), RobotType::Scout),
-                Robot::new((base_pos.0 + 33, base_pos.1), RobotType::Scout),
-                Robot::new((base_pos.0 + 25, base_pos.1), RobotType::Scout),
+                Robot::new(spawn( 12,   0), RobotType::Scout,     ( 1,  0)),
+                Robot::new(spawn(  0, -12), RobotType::Scout,     ( 0, -1)),
+                Robot::new(spawn(-12,   0), RobotType::Scout,     (-1,  0)),
+                Robot::new(spawn(  0,  12), RobotType::Scout,     ( 0,  1)),
 
-                Robot::new((base_pos.0 - 11, base_pos.1), RobotType::Collector),
-                Robot::new((base_pos.0 - 13, base_pos.1), RobotType::Collector),
-                Robot::new((base_pos.0 - 15, base_pos.1), RobotType::Collector),
-                Robot::new((base_pos.0 - 17, base_pos.1), RobotType::Collector),
-
+                Robot::new(spawn( 12,  2), RobotType::Collector,  ( 1,  0)),
+                Robot::new(spawn( 12, -2), RobotType::Collector,  ( 1,  0)),
+                Robot::new(spawn(-12,  2), RobotType::Collector,  (-1,  0)),
+                Robot::new(spawn(-12, -2), RobotType::Collector,  (-1,  0)),
             ], // Example robot starting near the base
             last_tick: Instant::now(),
-            tick_rate: Duration::from_millis(200), // 100 ms per tick
+            tick_rate: Duration::from_millis(100), // 100 ms per tick
             collected_crystals: HashSet::new(),
             collected_energy: HashSet::new(),
             discovered_crystals: HashSet::new(),
@@ -110,7 +117,7 @@ impl App {
 
     fn generate_map(width: usize, height: usize) -> Vec<Vec<f64>> {
         let perlin = Perlin::new(42);
-        let scale = 0.05;
+        let scale = 0.1;
 
         (0..height)
             .map(|y| {
@@ -443,10 +450,10 @@ fn render_base(pos: (u16, u16), area: Rect, buf: &mut ratatui::prelude::Buffer) 
 
 fn is_base_cell(x: u16, y: u16, pos: (u16, u16)) -> bool {
     let (bx, by) = pos;
-    let x_min = bx.saturating_sub(10);
-    let y_min = by.saturating_sub(10);
-    let x_max = bx + 10;
-    let y_max = by + 10;
+    let x_min = bx.saturating_sub(5);
+    let y_min = by.saturating_sub(5);
+    let x_max = bx + 5;
+    let y_max = by + 5;
 
     x >= x_min && x <= x_max && y >= y_min && y <= y_max
 }
@@ -479,21 +486,33 @@ fn move_scout(
     base_pos: (u16, u16),
     rng: &mut rand::rngs::ThreadRng,
 ) {
-    let directions = [(0,-1), (0,1), (-1,0), (1,0)];
+    let directions = [(0i16,-1i16), (0,1), (-1,0), (1,0)];
 
-    for _ in 0..4 {
-        let (dx, dy) = directions[rng.gen_range(0..4)];
+    // Build candidate list: preferred dir first, then random others
+    let mut candidates = vec![robot.preferred_dir];
+    let mut others: Vec<(i16, i16)> = directions.iter()
+        .filter(|&&d| d != robot.preferred_dir)
+        .copied()
+        .collect();
+    others.shuffle(rng);
+    candidates.extend(others);
 
-        let nx = (robot.position.0 as i16 + dx)
-            .clamp(1, width as i16 - 2) as u16;
+    // 70% chance to try preferred dir first, 30% go fully random
+    if rng.gen_bool(0.30) {
+        candidates.shuffle(rng);
+    }
 
-        let ny = (robot.position.1 as i16 + dy)
-            .clamp(1, height as i16 - 2) as u16;
+    for (dx, dy) in candidates {
+        let nx = (robot.position.0 as i16 + dx).clamp(1, width as i16 - 2) as u16;
+        let ny = (robot.position.1 as i16 + dy).clamp(1, height as i16 - 2) as u16;
 
-        if !is_obstacle(map, nx, ny)
-            && !is_base_cell(nx, ny, base_pos)
-        {
+        if !is_obstacle(map, nx, ny) && !is_base_cell(nx, ny, base_pos) {
             robot.position = (nx, ny);
+
+            // Occasionally rotate preferred direction to avoid getting stuck
+            if rng.gen_bool(0.05) {
+                robot.preferred_dir = directions[rng.gen_range(0..4)];
+            }
             break;
         }
     }
