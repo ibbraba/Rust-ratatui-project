@@ -124,7 +124,7 @@ impl App {
 
     fn generate_map(width: usize, height: usize) -> Vec<Vec<f64>> {
         let perlin = Perlin::new(42);
-        let scale = 0.05;
+        let scale = 0.03;
 
         (0..height)
             .map(|y| {
@@ -227,6 +227,7 @@ impl App {
 
                     if is_crystal(&self.map, next.0, next.1)
                         && !self.collected_crystals.contains(&next)
+                        && robot.state != RobotState::ReturningToBase
                     {
                         robot.carried_crystals += 1;
                         self.collected_crystals.insert(next);
@@ -247,6 +248,7 @@ impl App {
                     // NEW: collect energy stepped on while pathing
                     if is_energy(&self.map, next.0, next.1)
                         && !self.collected_energy.contains(&next)
+                        && robot.state != RobotState::ReturningToBase
                     {
                         robot.carried_energy += 1;
                         self.collected_energy.insert(next);
