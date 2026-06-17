@@ -37,6 +37,8 @@ pub struct App {
     
     collected_crystals: HashSet<(u16, u16)>,  // <-- add
     collected_energy: HashSet<(u16, u16)>,  // <-- add  
+    deposited_crystals: u32,
+    deposited_energy: u32,
     discovered_crystals: HashSet<(u16, u16)>, // Cristaux découverts par les scouts, base de savoir de tous les robots
     discovered_energy: HashSet<(u16, u16)>,  // <-- add
 
@@ -61,6 +63,7 @@ pub struct Robot {
     pub robot_type: RobotType,
     pub state: RobotState,
     pub carried_crystals: u32,
+    pub carried_energy: u32,
     pub path: VecDeque<(u16, u16)>,
     pub preferred_dir: (i16, i16),
 }
@@ -73,6 +76,7 @@ impl Robot {
             // Les robots commencent en mode exploration par défaut
             state: RobotState::Exploring,
             carried_crystals: 0,
+            carried_energy: 0,
             path: VecDeque::new(),
             preferred_dir: (0, 0),
         }
@@ -110,6 +114,8 @@ impl App {
             tick_rate: Duration::from_millis(100), // 100 ms per tick
             collected_crystals: HashSet::new(),
             collected_energy: HashSet::new(),
+            deposited_crystals: 0,
+            deposited_energy: 0,
             discovered_crystals: HashSet::new(),
             discovered_energy: HashSet::new(),
 
@@ -201,8 +207,11 @@ impl App {
                 if let Some(next) = robot.path.pop_front() {
                     robot.position = next;
                     // Depose les cristaux à la base si le robot y est arrivé
-                    if next == self.base_pos && robot.carried_crystals > 0  {
+                    if next == self.base_pos && (robot.carried_crystals > 0 || robot.carried_energy > 0)  {
+                        self.deposited_crystals += robot.carried_crystals;
+                        self.deposited_energy += robot.carried_energy;
                         robot.carried_crystals = 0;
+                        robot.carried_energy = 0;
                         robot.state = RobotState::Exploring;
                         // Pousse le robot en dehors de la base pour éviter qu'il ne reste coincé
                         let exits: &[(i16, i16)] = &[(2, 0), (-2, 0), (0, 2), (0, -2)];
@@ -239,7 +248,7 @@ impl App {
                     if is_energy(&self.map, next.0, next.1)
                         && !self.collected_energy.contains(&next)
                     {
-                        robot.carried_crystals += 1;
+                        robot.carried_energy += 1;
                         self.collected_energy.insert(next);
                         // Immediately path back to base
                         robot.path = bfs(
@@ -277,7 +286,7 @@ impl App {
                         );
                         robot.state = RobotState::ReturningToBase;
                     } else if is_energy(&self.map, rx, ry) && !self.collected_energy.contains(&(rx, ry)) {
-                        robot.carried_crystals += 1;
+                        robot.carried_energy += 1;
                         self.collected_energy.insert((rx, ry));
                         robot.path = bfs(
                             &self.map,
@@ -327,7 +336,11 @@ impl App {
     let mut all_targets: Vec<(u16, u16)> = available_crystals.chain(available_energy).collect();
 
     for robot in &mut self.robots {
-        if robot.robot_type != RobotType::Collector || !robot.path.is_empty() || robot.carried_crystals > 0 {
+        if robot.robot_type != RobotType::Collector 
+            || !robot.path.is_empty() 
+            || robot.carried_crystals > 0 
+            || robot.carried_energy > 0 
+        {
             continue;
         }
 
@@ -423,8 +436,8 @@ impl Widget for &App {
         // Summary at the bottom
         let summary = format!(
             " Cristaux collectés: {}  |  Énergie collectée: {}  |  Cristaux découverts: {}  |  Énergie découverte: {} ",
-            self.collected_crystals.len(),
-            self.collected_energy.len(),
+            self.deposited_crystals,
+            self.deposited_energy,
             self.discovered_crystals.len(),
             self.discovered_energy.len(),
         );
