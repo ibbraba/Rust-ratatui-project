@@ -41,6 +41,7 @@ pub struct App {
     deposited_energy: u32,
     discovered_crystals: HashSet<(u16, u16)>, // Cristaux découverts par les scouts, base de savoir de tous les robots
     discovered_energy: HashSet<(u16, u16)>,  // <-- add
+    resource_quantities: HashMap<(u16, u16), u32>,
 
 }
 
@@ -93,9 +94,24 @@ impl App {
         let y = (base_pos.1 as i16 + dy).clamp(1, height as i16 - 2) as u16;
         (x, y)
     };
+        let map = Self::generate_map(width, height);
+
+        let mut resource_quantities = HashMap::new();
+        let mut rng = rand::thread_rng();
+        for y in 0..height as u16 {
+            for x in 0..width as u16 {
+                if is_base_cell(x, y, base_pos) || is_obstacle(&map, x, y) {
+                    continue;
+                }
+                if is_crystal(&map, x, y) || is_energy(&map, x, y) {
+                    resource_quantities.insert((x, y), rng.gen_range(50..=250));
+                }
+            }
+        }
+
         Self {
             exit: false,
-            map: Self::generate_map(width, height),
+            map,
             width,
             height,
             base_pos,
@@ -118,18 +134,29 @@ impl App {
             deposited_energy: 0,
             discovered_crystals: HashSet::new(),
             discovered_energy: HashSet::new(),
+            resource_quantities,
 
         }
     }
 
     fn generate_map(width: usize, height: usize) -> Vec<Vec<f64>> {
         let perlin = Perlin::new(42);
-        let scale = 0.03;
+        let scale = 0.1;
+        let base_x = width as i32 / 2;
+        let base_y = height as i32 / 2;
 
         (0..height)
             .map(|y| {
                 (0..width)
-                    .map(|x| perlin.get([x as f64 * scale, y as f64 * scale]))
+                    .map(|x| {
+                        let dx = x as i32 - base_x;
+                        let dy = y as i32 - base_y;
+                        if dx.abs().max(dy.abs()) <= 15 {
+                            0.0 // Empty ground, no obstacle, crystal, or energy
+                        } else {
+                            perlin.get([x as f64 * scale, y as f64 * scale])
+                        }
+                    })
                     .collect()
             })
             .collect()
