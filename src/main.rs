@@ -1,6 +1,10 @@
 use std::io::{self, Stdout};
-use std::time::{Instant, Duration};
-use std::collections::{HashSet, VecDeque, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet, VecDeque};
 use crossterm::event::KeyEventKind;
 use noise::{NoiseFn, Perlin};
 use rand::Rng;
@@ -25,24 +29,31 @@ fn main() -> io::Result<()> {
     app_result
 }
 
-pub struct App {
-    exit: bool,
-    map: Vec<Vec<f64>>,
+/// État partagé entre les threads robots (protégé par Mutex).
+struct SimulationState {
+    map: Arc<Vec<Vec<f64>>>,
     width: usize,
     height: usize,
-    base_pos: (u16, u16), 
+    base_pos: (u16, u16),
     robots: Vec<Robot>,
-    last_tick: Instant,       
-    tick_rate: Duration,      // <-- add
-    
-    collected_crystals: HashSet<(u16, u16)>,  // <-- add
-    collected_energy: HashSet<(u16, u16)>,  // <-- add  
+    collected_crystals: HashSet<(u16, u16)>,
+    collected_energy: HashSet<(u16, u16)>,
     deposited_crystals: u32,
     deposited_energy: u32,
-    discovered_crystals: HashSet<(u16, u16)>, // Cristaux découverts par les scouts, base de savoir de tous les robots
-    discovered_energy: HashSet<(u16, u16)>,  // <-- add
+    discovered_crystals: HashSet<(u16, u16)>,
+    discovered_energy: HashSet<(u16, u16)>,
     resource_quantities: HashMap<(u16, u16), u32>,
+}
 
+pub struct App {
+    exit: bool,
+    state: Arc<Mutex<SimulationState>>,
+    last_tick: Instant,
+    tick_rate: Duration,
+    tick_senders: Vec<Sender<()>>,
+    done_receiver: Receiver<()>,
+    stop: Arc<AtomicBool>,
+    robot_handles: Vec<JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -109,25 +120,27 @@ impl App {
             }
         }
 
-        Self {
-            exit: false,
-            map,
+        let robots = vec![
+            Robot::new(spawn(12, 0), RobotType::Scout, (1, 0)),
+            Robot::new(spawn(0, -12), RobotType::Scout, (0, -1)),
+            Robot::new(spawn(-12, 0), RobotType::Scout, (-1, 0)),
+            Robot::new(spawn(0, 12), RobotType::Scout, (0, 1)),
+            Robot::new(spawn(12, 2), RobotType::Collector, (1, 0)),
+            Robot::new(spawn(12, -2), RobotType::Collector, (1, 0)),
+            Robot::new(spawn(-12, 2), RobotType::Collector, (-1, 0)),
+            Robot::new(spawn(-12, -2), RobotType::Collector, (-1, 0)),
+        ];
+
+        let map = Arc::new(map);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_receiver) = mpsc::channel();
+
+        let state = Arc::new(Mutex::new(SimulationState {
+            map: Arc::clone(&map),
             width,
             height,
             base_pos,
-            robots: vec![
-                Robot::new(spawn( 12,   0), RobotType::Scout,     ( 1,  0)),
-                Robot::new(spawn(  0, -12), RobotType::Scout,     ( 0, -1)),
-                Robot::new(spawn(-12,   0), RobotType::Scout,     (-1,  0)),
-                Robot::new(spawn(  0,  12), RobotType::Scout,     ( 0,  1)),
-
-                Robot::new(spawn( 12,  2), RobotType::Collector,  ( 1,  0)),
-                Robot::new(spawn( 12, -2), RobotType::Collector,  ( 1,  0)),
-                Robot::new(spawn(-12,  2), RobotType::Collector,  (-1,  0)),
-                Robot::new(spawn(-12, -2), RobotType::Collector,  (-1,  0)),
-            ], // Example robot starting near the base
-            last_tick: Instant::now(),
-            tick_rate: Duration::from_millis(100), // 100 ms per tick
+            robots,
             collected_crystals: HashSet::new(),
             collected_energy: HashSet::new(),
             deposited_crystals: 0,
@@ -135,7 +148,35 @@ impl App {
             discovered_crystals: HashSet::new(),
             discovered_energy: HashSet::new(),
             resource_quantities,
+        }));
 
+        let mut tick_senders = Vec::new();
+        let mut robot_handles = Vec::new();
+
+        for robot_id in 0..state.lock().unwrap().robots.len() {
+            let (tick_tx, tick_rx) = mpsc::channel();
+            tick_senders.push(tick_tx);
+
+            let thread_state = Arc::clone(&state);
+            let thread_stop = Arc::clone(&stop);
+            let thread_done = done_tx.clone();
+
+            robot_handles.push(thread::spawn(move || {
+                robot_thread_loop(robot_id, thread_state, tick_rx, thread_done, thread_stop);
+            }));
+        }
+
+        drop(done_tx);
+
+        Self {
+            exit: false,
+            state,
+            last_tick: Instant::now(),
+            tick_rate: Duration::from_millis(100),
+            tick_senders,
+            done_receiver,
+            stop,
+            robot_handles,
         }
     }
 
@@ -179,14 +220,43 @@ impl App {
             }
         }
 
-        // Déplacer les robots à chaque tick
+        // Envoie un tick à chaque thread robot (simulation concurrente)
         if self.last_tick.elapsed() >= self.tick_rate {
-            self.update_robots();
+            self.signal_robot_tick();
             self.last_tick = Instant::now();
         }
     }
 
+        self.shutdown();
         Ok(())
+    }
+
+    fn signal_robot_tick(&self) {
+        let robot_count = self.tick_senders.len();
+
+        for tx in &self.tick_senders {
+            let _ = tx.send(());
+        }
+
+        for _ in 0..robot_count {
+            let _ = self.done_receiver.recv();
+        }
+
+        if let Ok(mut state) = self.state.lock() {
+            assign_collectors(&mut state);
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+
+        for tx in &self.tick_senders {
+            let _ = tx.send(());
+        }
+
+        for handle in self.robot_handles.drain(..) {
+            let _ = handle.join();
+        }
     }
 
     fn draw(&self, frame: &mut ratatui::Frame<'_>) {
@@ -200,181 +270,219 @@ impl App {
         Ok(())
     }
 
-  fn update_robots(&mut self) {
-    let mut rng = rand::thread_rng();
-    let mut newly_discovered: Vec<(u16, u16)> = vec![];
-    let mut newly_discovered_energy: Vec<(u16, u16)> = vec![];
+}
 
-    for robot in &mut self.robots {
-        match robot.robot_type {
+/// Boucle exécutée dans un thread dédié par robot.
+fn robot_thread_loop(
+    robot_id: usize,
+    state: Arc<Mutex<SimulationState>>,
+    tick_rx: Receiver<()>,
+    done_tx: Sender<()>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        if tick_rx.recv().is_err() {
+            break;
+        }
 
-            RobotType::Scout => {
-                // Move randomly, report any crystal found
-                move_scout(robot, &self.map, self.width, self.height, self.base_pos, &mut rng);
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
 
-                let (rx, ry) = robot.position;
+        let mut rng = rand::thread_rng();
+        if let Ok(mut sim) = state.lock() {
+            tick_robot(&mut sim, robot_id, &mut rng);
+        }
 
-                if is_crystal(&self.map, rx, ry)
-                    && !self.collected_crystals.contains(&(rx, ry))
-                    && !self.discovered_crystals.contains(&(rx, ry))
-                {
-                    newly_discovered.push((rx, ry));
-                }
+        let _ = done_tx.send(());
+    }
+}
 
-                // NEW: scouts also report energy
-                if is_energy(&self.map, rx, ry)
-                    && !self.collected_energy.contains(&(rx, ry))
-                    && !self.discovered_energy.contains(&(rx, ry))
-                {
-                    newly_discovered_energy.push((rx, ry));
-                }
+fn tick_robot(state: &mut SimulationState, robot_id: usize, rng: &mut rand::rngs::ThreadRng) {
+    let map = Arc::clone(&state.map);
+    let width = state.width;
+    let height = state.height;
+    let base_pos = state.base_pos;
+    let robot_type = state.robots[robot_id].robot_type;
+
+    match robot_type {
+        RobotType::Scout => {
+            {
+                let robot = &mut state.robots[robot_id];
+                move_scout(robot, &map, width, height, base_pos, rng);
             }
 
-            RobotType::Collector => {
-                if let Some(next) = robot.path.pop_front() {
-                    robot.position = next;
-                    // Depose les cristaux à la base si le robot y est arrivé
-                    if next == self.base_pos && (robot.carried_crystals > 0 || robot.carried_energy > 0)  {
-                        self.deposited_crystals += robot.carried_crystals;
-                        self.deposited_energy += robot.carried_energy;
+            let (rx, ry) = state.robots[robot_id].position;
+
+            if is_crystal(&map, rx, ry)
+                && !state.collected_crystals.contains(&(rx, ry))
+                && !state.discovered_crystals.contains(&(rx, ry))
+            {
+                state.discovered_crystals.insert((rx, ry));
+            }
+
+            if is_energy(&map, rx, ry)
+                && !state.collected_energy.contains(&(rx, ry))
+                && !state.discovered_energy.contains(&(rx, ry))
+            {
+                state.discovered_energy.insert((rx, ry));
+            }
+        }
+
+        RobotType::Collector => {
+            let next = state.robots[robot_id].path.pop_front();
+
+            if let Some(next) = next {
+                state.robots[robot_id].position = next;
+
+                if next == base_pos {
+                    let (crystals, energy) = {
+                        let robot = &state.robots[robot_id];
+                        (robot.carried_crystals, robot.carried_energy)
+                    };
+                    if crystals > 0 || energy > 0 {
+                        state.deposited_crystals += crystals;
+                        state.deposited_energy += energy;
+                        let robot = &mut state.robots[robot_id];
                         robot.carried_crystals = 0;
                         robot.carried_energy = 0;
                         robot.state = RobotState::Exploring;
-                        // Pousse le robot en dehors de la base pour éviter qu'il ne reste coincé
+
                         let exits: &[(i16, i16)] = &[(2, 0), (-2, 0), (0, 2), (0, -2)];
                         for (dx, dy) in exits {
-                            let ex = (next.0 as i16 + dx).clamp(1, self.width as i16 - 2) as u16;
-                            let ey = (next.1 as i16 + dy).clamp(1, self.height as i16 - 2) as u16;
-                            if !is_base_cell(ex, ey, self.base_pos) && !is_obstacle(&self.map, ex, ey) {
+                            let ex = (next.0 as i16 + dx).clamp(1, width as i16 - 2) as u16;
+                            let ey = (next.1 as i16 + dy).clamp(1, height as i16 - 2) as u16;
+                            if !is_base_cell(ex, ey, base_pos) && !is_obstacle(&map, ex, ey) {
                                 robot.path = VecDeque::from([(ex, ey)]);
                                 break;
                             }
                         }
                     }
+                }
 
-                    if is_crystal(&self.map, next.0, next.1)
-                        && !self.collected_crystals.contains(&next)
-                        && robot.state != RobotState::ReturningToBase
-                    {
-                        robot.carried_crystals += 1;
-                        self.collected_crystals.insert(next);
-                        // Retour immédiat à la base après avoir collecté un cristal
-                        robot.path = bfs(
-                            &self.map,
-                            &self.collected_crystals,
-                            &self.collected_energy,
-                            next,
-                            self.base_pos,
-                            self.width,
-                            self.height,
-                            self.base_pos,
-                        );
-                        robot.state = RobotState::ReturningToBase;
-                    }
+                let robot_state = state.robots[robot_id].state;
+                let collected_c = state.collected_crystals.clone();
+                let collected_e = state.collected_energy.clone();
 
-                    // NEW: collect energy stepped on while pathing
-                    if is_energy(&self.map, next.0, next.1)
-                        && !self.collected_energy.contains(&next)
-                        && robot.state != RobotState::ReturningToBase
-                    {
-                        robot.carried_energy += 1;
-                        self.collected_energy.insert(next);
-                        // Immediately path back to base
-                        robot.path = bfs(
-                            &self.map,
-                            &self.collected_crystals,
-                            &self.collected_energy,
-                            next,
-                            self.base_pos,
-                            self.width,
-                            self.height,
-                            self.base_pos,
-                        );
-                        robot.state = RobotState::ReturningToBase;
-                    }
-
-
-                }else {
+                if is_crystal(&map, next.0, next.1)
+                    && !collected_c.contains(&next)
+                    && robot_state != RobotState::ReturningToBase
+                {
+                    state.collected_crystals.insert(next);
+                    let path = bfs(
+                        &map,
+                        &state.collected_crystals,
+                        &state.collected_energy,
+                        next,
+                        base_pos,
+                        width,
+                        height,
+                        base_pos,
+                    );
+                    let robot = &mut state.robots[robot_id];
+                    robot.carried_crystals += 1;
+                    robot.path = path;
+                    robot.state = RobotState::ReturningToBase;
+                } else if is_energy(&map, next.0, next.1)
+                    && !collected_e.contains(&next)
+                    && robot_state != RobotState::ReturningToBase
+                {
+                    state.collected_energy.insert(next);
+                    let path = bfs(
+                        &map,
+                        &state.collected_crystals,
+                        &state.collected_energy,
+                        next,
+                        base_pos,
+                        width,
+                        height,
+                        base_pos,
+                    );
+                    let robot = &mut state.robots[robot_id];
+                    robot.carried_energy += 1;
+                    robot.path = path;
+                    robot.state = RobotState::ReturningToBase;
+                }
+            } else {
+                {
+                    let robot = &mut state.robots[robot_id];
                     robot.state = RobotState::Exploring;
-                    move_scout(robot, &self.map, self.width, self.height, self.base_pos, &mut rng);
+                    move_scout(robot, &map, width, height, base_pos, rng);
+                }
 
-                    let (rx, ry) = robot.position;
+                let (rx, ry) = state.robots[robot_id].position;
 
-                    if is_crystal(&self.map, rx, ry) && !self.collected_crystals.contains(&(rx, ry)) {
-                        robot.carried_crystals += 1;
-                        self.collected_crystals.insert((rx, ry));
-                        robot.path = bfs(
-                            &self.map,
-                            &self.collected_crystals,
-                            &self.collected_energy,
-                            (rx, ry),
-                            self.base_pos,
-                            self.width,
-                            self.height,
-                            self.base_pos,
-                        );
-                        robot.state = RobotState::ReturningToBase;
-                    } else if is_energy(&self.map, rx, ry) && !self.collected_energy.contains(&(rx, ry)) {
-                        robot.carried_energy += 1;
-                        self.collected_energy.insert((rx, ry));
-                        robot.path = bfs(
-                            &self.map,
-                            &self.collected_crystals,
-                            &self.collected_energy,
-                            (rx, ry),
-                            self.base_pos,
-                            self.width,
-                            self.height,
-                            self.base_pos,
-                        );
-                        robot.state = RobotState::ReturningToBase;
-                    }
+                if is_crystal(&map, rx, ry) && !state.collected_crystals.contains(&(rx, ry)) {
+                    state.collected_crystals.insert((rx, ry));
+                    let path = bfs(
+                        &map,
+                        &state.collected_crystals,
+                        &state.collected_energy,
+                        (rx, ry),
+                        base_pos,
+                        width,
+                        height,
+                        base_pos,
+                    );
+                    let robot = &mut state.robots[robot_id];
+                    robot.carried_crystals += 1;
+                    robot.path = path;
+                    robot.state = RobotState::ReturningToBase;
+                } else if is_energy(&map, rx, ry) && !state.collected_energy.contains(&(rx, ry)) {
+                    state.collected_energy.insert((rx, ry));
+                    let path = bfs(
+                        &map,
+                        &state.collected_crystals,
+                        &state.collected_energy,
+                        (rx, ry),
+                        base_pos,
+                        width,
+                        height,
+                        base_pos,
+                    );
+                    let robot = &mut state.robots[robot_id];
+                    robot.carried_energy += 1;
+                    robot.path = path;
+                    robot.state = RobotState::ReturningToBase;
                 }
             }
         }
     }
+}
 
-    // Register newly found crystals
-    for pos in newly_discovered {
-        self.discovered_crystals.insert(pos);
-    }
-
-    for pos in newly_discovered_energy {
-        self.discovered_energy.insert(pos);
-    }
-
-
-    // Assign unoccupied collectors to known crystals
-    self.assign_collectors();
-    }
-
-    fn assign_collectors(&mut self) {
-    let mut already_targeted: HashSet<(u16, u16)> = self.robots.iter()
+fn assign_collectors(state: &mut SimulationState) {
+    let mut already_targeted: HashSet<(u16, u16)> = state
+        .robots
+        .iter()
         .filter(|r| r.robot_type == RobotType::Collector && !r.path.is_empty())
         .filter_map(|r| r.path.back().copied())
         .collect();
 
-    let available_crystals = self.discovered_crystals.iter()
-        .filter(|p| !self.collected_crystals.contains(p) && !already_targeted.contains(p))
+    let available_crystals = state
+        .discovered_crystals
+        .iter()
+        .filter(|p| !state.collected_crystals.contains(p) && !already_targeted.contains(p))
         .copied();
 
-    let available_energy = self.discovered_energy.iter()
-        .filter(|p| !self.collected_energy.contains(p) && !already_targeted.contains(p))
+    let available_energy = state
+        .discovered_energy
+        .iter()
+        .filter(|p| !state.collected_energy.contains(p) && !already_targeted.contains(p))
         .copied();
 
     let mut all_targets: Vec<(u16, u16)> = available_crystals.chain(available_energy).collect();
 
-    for robot in &mut self.robots {
-        if robot.robot_type != RobotType::Collector 
-            || !robot.path.is_empty() 
-            || robot.carried_crystals > 0 
-            || robot.carried_energy > 0 
+    for robot in &mut state.robots {
+        if robot.robot_type != RobotType::Collector
+            || !robot.path.is_empty()
+            || robot.carried_crystals > 0
+            || robot.carried_energy > 0
         {
             continue;
         }
 
-        // Trouve le robot le mieux placé
-       let best_placed = all_targets.iter()
+        let best_placed = all_targets
+            .iter()
             .enumerate()
             .min_by_key(|(_, pos)| {
                 let dx = pos.0 as i32 - robot.position.0 as i32;
@@ -385,24 +493,22 @@ impl App {
 
         if let Some((idx, target)) = best_placed {
             let path = bfs(
-                &self.map,
-                &self.collected_crystals,
-                &self.collected_energy,
+                &state.map,
+                &state.collected_crystals,
+                &state.collected_energy,
                 robot.position,
                 target,
-                self.width,
-                self.height,
-                self.base_pos,
+                state.width,
+                state.height,
+                state.base_pos,
             );
             if !path.is_empty() {
                 robot.path = path;
                 robot.state = RobotState::Collecting;
-                // Remove so the next collector picks a different target
                 all_targets.remove(idx);
                 already_targeted.insert(target);
             }
         }
-    }
     }
 }
 
@@ -411,39 +517,36 @@ impl Widget for &App {
     where
         Self: Sized,
     {
-        //Render le bruit de Perlin sur toute la carte
+        let state = match self.state.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
         for y in 0..area.height as usize {
             for x in 0..area.width as usize {
-                
-                //Evite de dessiner le bruit sur la base
-                if is_base_cell(x as u16, y as u16, self.base_pos) {
+                if is_base_cell(x as u16, y as u16, state.base_pos) {
                     continue;
                 }
 
-                //Evite de dessiner le bruit sur les bords de la carte
-                if x == 0 || x == area.width as usize - 1 || y == 0 || y == area.height as usize - 1 {
+                if x == 0 || x == area.width as usize - 1 || y == 0 || y == area.height as usize - 1
+                {
                     continue;
                 }
 
-                //Todo : Creer un nombre random pour les cristaux et l'energie 
-                //Passer le compteur restant de ressources dans la fonction render_cell 
-                //Render les cristaux et l'energie en fonction du compteur restant
-
-
-                if y >= self.height || x >= self.width {
+                if y >= state.height || x >= state.width {
                     continue;
                 }
 
-                let value = self.map[y][x];
+                let value = state.map[y][x];
 
-               let (symbol, color) = if self.collected_crystals.contains(&(x as u16, y as u16)) {
+                let (symbol, color) = if state.collected_crystals.contains(&(x as u16, y as u16)) {
                     (" ", Color::DarkGray)
-                } else if self.collected_energy.contains(&(x as u16, y as u16)) {
+                } else if state.collected_energy.contains(&(x as u16, y as u16)) {
                     (" ", Color::DarkGray)
-                } else if self.discovered_crystals.contains(&(x as u16, y as u16)) {
+                } else if state.discovered_crystals.contains(&(x as u16, y as u16)) {
                     ("C", Color::LightYellow)
-                } else if self.discovered_energy.contains(&(x as u16, y as u16)) {
-                    ("E", Color::LightGreen)   // brighter = known to all robots
+                } else if state.discovered_energy.contains(&(x as u16, y as u16)) {
+                    ("E", Color::LightGreen)
                 } else {
                     render_cell(value)
                 };
@@ -454,37 +557,35 @@ impl Widget for &App {
             }
         }
 
-        // Base au milieu de la carte
-        render_base(self.base_pos, area, buf);
+        render_base(state.base_pos, area, buf);
 
-        // Title overlay on the first line
         Line::from("Robots Game — Appuyez sur n'importe quelle touche pour quitter")
-            .bold().yellow()
+            .bold()
+            .yellow()
             .render(area, buf);
 
-        // Summary at the bottom
         let summary = format!(
             " Cristaux collectés: {}  |  Énergie collectée: {}  |  Cristaux découverts: {}  |  Énergie découverte: {} ",
-            self.deposited_crystals,
-            self.deposited_energy,
-            self.discovered_crystals.len(),
-            self.discovered_energy.len(),
+            state.deposited_crystals,
+            state.deposited_energy,
+            state.discovered_crystals.len(),
+            state.discovered_energy.len(),
         );
 
         let bottom_area = Rect {
             x: area.x,
-            y: area.y + area.height - 1,  // last row
+            y: area.y + area.height - 1,
             width: area.width,
             height: 1,
         };
 
         Line::from(summary)
-            .bold().light_blue()
+            .bold()
+            .light_blue()
             .centered()
             .render(bottom_area, buf);
 
-        //Render les robots
-        for robot in &self.robots {
+        for robot in &state.robots {
             let (rx, ry) = robot.position;
             let (symbol, color) = match robot.robot_type {
                 RobotType::Scout => ("X", Color::LightRed),
@@ -494,7 +595,7 @@ impl Widget for &App {
             buf[(area.x + rx, area.y + ry)]
                 .set_symbol(symbol)
                 .set_style(Style::default().fg(color).bold());
-            }
+        }
     }
 }
 
@@ -554,29 +655,27 @@ fn is_base_cell(x: u16, y: u16, pos: (u16, u16)) -> bool {
     x >= x_min && x <= x_max && y >= y_min && y <= y_max
 }
 
-fn map_value(map: &Vec<Vec<f64>>, x: u16, y: u16) -> f64 {
-    let map_y = y as usize % map.len();
-    let map_x = x as usize % map[0].len();
-    map[map_y][map_x]
+fn map_value(map: &[Vec<f64>], x: u16, y: u16) -> f64 {
+    map[y as usize % map.len()][x as usize % map[0].len()]
 }
 
-fn is_obstacle(map: &Vec<Vec<f64>>, x: u16, y: u16) -> bool {
+fn is_obstacle(map: &[Vec<f64>], x: u16, y: u16) -> bool {
     map_value(map, x, y) < -0.1
 }
 
-fn is_crystal(map: &Vec<Vec<f64>>, x: u16, y: u16) -> bool {
+fn is_crystal(map: &[Vec<f64>], x: u16, y: u16) -> bool {
     let v = map_value(map, x, y);
-    v >= 0.15 && v < 0.30  // matches the new "C" band
+    v >= 0.15 && v < 0.30
 }
 
-fn is_energy(map: &Vec<Vec<f64>>, x: u16, y: u16) -> bool {
+fn is_energy(map: &[Vec<f64>], x: u16, y: u16) -> bool {
     let v = map_value(map, x, y);
-    v >= 0.45 && v < 0.60  // matches the "E" band
+    v >= 0.45 && v < 0.60
 }
 
 fn move_scout(
     robot: &mut Robot,
-    map: &Vec<Vec<f64>>,
+    map: &Arc<Vec<Vec<f64>>>,
     width: usize,
     height: usize,
     base_pos: (u16, u16),
@@ -651,7 +750,7 @@ fn move_collector(
 }
 
 fn bfs(
-    map: &Vec<Vec<f64>>,
+    map: &Arc<Vec<Vec<f64>>>,
     collected_crystals: &HashSet<(u16, u16)>,
     collected_energy: &HashSet<(u16, u16)>,   // <-- add
     from: (u16, u16),
@@ -690,7 +789,7 @@ fn bfs(
             }
         }
     }
-
     VecDeque::new()
 }
+
 
