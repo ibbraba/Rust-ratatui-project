@@ -20,8 +20,8 @@ pub(crate) fn is_base_cell(x: u16, y: u16, pos: (u16, u16)) -> bool {
     let (bx, by) = pos;
     let x_min = bx.saturating_sub(1);
     let y_min = by.saturating_sub(1);
-    let x_max = bx + 5;
-    let y_max = by + 5;
+    let x_max = bx + 1;
+    let y_max = by + 1;
 
     x >= x_min && x <= x_max && y >= y_min && y <= y_max
 }
