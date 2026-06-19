@@ -105,7 +105,8 @@ impl App {
                 }
 
                 if is_crystal(&map, x, y) || is_energy(&map, x, y) {
-                    resource_quantities.insert((x, y), rng.gen_range(50..=250));
+                    let qty = rng.gen_range(50..=200);
+                    resource_quantities.insert((x, y), qty);
                 }
             }
         }

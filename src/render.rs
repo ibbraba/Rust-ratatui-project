@@ -28,7 +28,7 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
             } else if state.discovered_crystals.contains(&(x as u16, y as u16)) {
                 ("C", Color::LightYellow)
             } else if state.discovered_energy.contains(&(x as u16, y as u16)) {
-                ("E", Color::LightGreen)
+                ("E", Color::LightRed)
             } else {
                 render_cell(value)
             };
