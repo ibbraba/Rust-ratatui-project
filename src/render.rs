@@ -28,7 +28,7 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
             } else if state.discovered_crystals.contains(&(x as u16, y as u16)) {
                 ("C", Color::LightYellow)
             } else if state.discovered_energy.contains(&(x as u16, y as u16)) {
-                ("E", Color::LightGreen)
+                ("E", Color::LightRed)
             } else {
                 render_cell(value)
             };
@@ -70,7 +70,7 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
     for robot in &state.robots {
         let (rx, ry) = robot.position;
         let (symbol, color) = match robot.robot_type {
-            RobotType::Scout => ("X", Color::LightRed),
+            RobotType::Scout => ("x", Color::LightRed),
             RobotType::Collector => ("o", Color::Magenta),
         };
 
@@ -82,9 +82,9 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
 
 fn render_cell(value: f64) -> (&'static str, Color) {
     match value {
-        v if v < -0.1 => ("O", Color::Cyan),
+        v if v < -0.1 => ("0", Color::Cyan),
         v if v < 0.15 => (" ", Color::DarkGray),
-        v if v < 0.30 => ("C", Color::Yellow),
+        v if v < 0.30 => ("C", Color::LightMagenta),
         v if v < 0.45 => (" ", Color::DarkGray),
         v if v < 0.60 => ("E", Color::Green),
         _ => (" ", Color::White),
