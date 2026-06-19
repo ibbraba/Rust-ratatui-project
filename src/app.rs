@@ -35,6 +35,34 @@ pub(crate) struct SimulationState {
     pub(crate) resource_quantities: HashMap<(u16, u16), u32>,
 }
 
+impl SimulationState {
+    pub(crate) fn new_test(map: Vec<Vec<f64>>, base_pos: (u16, u16), robots: Vec<Robot>) -> Self {
+        let width = map[0].len();
+        let height = map.len();
+        Self {
+            map: Arc::new(map),
+            width,
+            height,
+            base_pos,
+            robots,
+            collected_crystals: HashSet::new(),
+            collected_energy: HashSet::new(),
+            deposited_crystals: 0,
+            deposited_energy: 0,
+            discovered_crystals: HashSet::new(),
+            discovered_energy: HashSet::new(),
+            resource_quantities: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn tick(&mut self, rng: &mut impl Rng) {
+        for robot_id in 0..self.robots.len() {
+            tick_robot(self, robot_id, rng);
+        }
+        assign_collectors(self);
+    }
+}
+
 pub(crate) struct App {
     exit: bool,
     state: Arc<Mutex<SimulationState>>,
@@ -46,13 +74,13 @@ pub(crate) struct App {
     robot_handles: Vec<JoinHandle<()>>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum RobotType {
     Scout,
     Collector,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum RobotState {
     Exploring,
     MovingToResource,
@@ -297,7 +325,7 @@ fn robot_thread_loop(
     }
 }
 
-fn tick_robot(state: &mut SimulationState, robot_id: usize, rng: &mut rand::rngs::ThreadRng) {
+fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R) {
     let map = Arc::clone(&state.map);
     let width = state.width;
     let height = state.height;
@@ -539,13 +567,13 @@ fn assign_collectors(state: &mut SimulationState) {
     }
 }
 
-fn move_scout(
+fn move_scout<R: Rng>(
     robot: &mut Robot,
-    map: &Arc<Vec<Vec<f64>>>,
+    map: &[Vec<f64>],
     width: usize,
     height: usize,
     base_pos: (u16, u16),
-    rng: &mut rand::rngs::ThreadRng,
+    rng: &mut R,
     occupied_positions: &HashSet<(u16, u16)>,
 ) {
     let directions = [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)];
@@ -579,5 +607,115 @@ fn move_scout(
             robot.preferred_dir = (dx, dy);
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn setup_test_map() -> Vec<Vec<f64>> {
+        vec![vec![0.0; 10]; 10]
+    }
+
+    #[test]
+    fn test_safe_spawn_zone() {
+        let map = App::generate_map(40, 40);
+        for y in 5..=35 {
+            for x in 5..=35 {
+                let dx = x as i32 - 20;
+                let dy = y as i32 - 20;
+                if dx.abs().max(dy.abs()) <= 15 {
+                    assert_eq!(map[y][x], 0.0, "Obstacle or resource in safe zone at ({}, {})", x, y);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_scout_movement() {
+        let map = setup_test_map();
+        let base_pos = (5, 5);
+        let mut robot = Robot::new((2, 2), RobotType::Scout, (1, 0));
+        let mut rng = StdRng::seed_from_u64(1234);
+
+        move_scout(&mut robot, &map, 10, 10, base_pos, &mut rng);
+
+        let (x, y) = robot.position;
+        let dx = (x as i16 - 2).abs();
+        let dy = (y as i16 - 2).abs();
+        assert_eq!(dx + dy, 1, "Scout must move exactly one tile orthogonally");
+    }
+
+    #[test]
+    fn test_collector_resource_collection() {
+        let mut map = setup_test_map();
+        map[2][3] = 0.2; // crystal
+        let base_pos = (5, 5);
+        
+        let mut robot = Robot::new((2, 2), RobotType::Collector, (0, 0));
+        robot.path = VecDeque::from(vec![(3, 2)]);
+        robot.state = RobotState::Exploring;
+
+        let robots = vec![robot];
+        let mut state = SimulationState::new_test(map, base_pos, robots);
+        state.resource_quantities.insert((3, 2), 10);
+
+        let mut rng = StdRng::seed_from_u64(1234);
+
+        state.tick(&mut rng);
+
+        assert_eq!(state.robots[0].position, (3, 2));
+        assert_eq!(state.robots[0].carried_crystals, 1);
+        assert_eq!(state.robots[0].state, RobotState::ReturningToBase);
+        assert!(state.collected_crystals.contains(&(3, 2)));
+    }
+
+    #[test]
+    fn test_collector_deposit_at_base() {
+        let map = setup_test_map();
+        let base_pos = (5, 5);
+        
+        let mut robot = Robot::new((5, 5), RobotType::Collector, (0, 0));
+        robot.carried_crystals = 3;
+        robot.carried_energy = 2;
+        robot.state = RobotState::ReturningToBase;
+        robot.path = VecDeque::from(vec![(5, 5)]);
+
+        let robots = vec![robot];
+        let mut state = SimulationState::new_test(map, base_pos, robots);
+
+        let mut rng = StdRng::seed_from_u64(1234);
+        state.tick(&mut rng);
+
+        assert_eq!(state.deposited_crystals, 3);
+        assert_eq!(state.deposited_energy, 2);
+        assert_eq!(state.robots[0].carried_crystals, 0);
+        assert_eq!(state.robots[0].carried_energy, 0);
+        assert_eq!(state.robots[0].state, RobotState::Exploring);
+    }
+
+    #[test]
+    fn test_collection_avoidance_on_return() {
+        let mut map = setup_test_map();
+        map[5][4] = 0.2; // crystal
+
+        let base_pos = (5, 5);
+        let mut robot = Robot::new((3, 5), RobotType::Collector, (0, 0));
+        robot.carried_crystals = 1;
+        robot.state = RobotState::ReturningToBase;
+        robot.path = VecDeque::from(vec![(4, 5), (5, 5)]);
+
+        let robots = vec![robot];
+        let mut state = SimulationState::new_test(map, base_pos, robots);
+        let mut rng = StdRng::seed_from_u64(1234);
+
+        state.tick(&mut rng);
+
+        assert_eq!(state.robots[0].position, (4, 5));
+        assert_eq!(state.robots[0].carried_crystals, 1);
+        assert!(!state.collected_crystals.contains(&(4, 5)));
     }
 }
