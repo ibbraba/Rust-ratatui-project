@@ -110,15 +110,25 @@ impl App {
             }
         }
 
+        let mut spawn_positions = Vec::new();
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let x = (base_pos.0 as i16 + dx).clamp(1, width as i16 - 2) as u16;
+                let y = (base_pos.1 as i16 + dy).clamp(1, height as i16 - 2) as u16;
+                spawn_positions.push((x, y));
+            }
+        }
+
+        // Assigner une position unique de la liste à chaque robot (8 robots pour 9 cases)
         let robots = vec![
-            Robot::new(spawn(12, 0), RobotType::Scout, (1, 0)),
-            Robot::new(spawn(0, -12), RobotType::Scout, (0, -1)),
-            Robot::new(spawn(-12, 0), RobotType::Scout, (-1, 0)),
-            Robot::new(spawn(0, 12), RobotType::Scout, (0, 1)),
-            Robot::new(spawn(12, 2), RobotType::Collector, (1, 0)),
-            Robot::new(spawn(12, -2), RobotType::Collector, (1, 0)),
-            Robot::new(spawn(-12, 2), RobotType::Collector, (-1, 0)),
-            Robot::new(spawn(-12, -2), RobotType::Collector, (-1, 0)),
+            Robot::new(spawn_positions[0], RobotType::Scout, (1, 0)),
+            Robot::new(spawn_positions[1], RobotType::Scout, (0, -1)),
+            Robot::new(spawn_positions[2], RobotType::Scout, (-1, 0)),
+            Robot::new(spawn_positions[3], RobotType::Scout, (0, 1)),
+            Robot::new(spawn_positions[4], RobotType::Collector, (1, 0)),
+            Robot::new(spawn_positions[5], RobotType::Collector, (1, 0)),
+            Robot::new(spawn_positions[6], RobotType::Collector, (-1, 0)),
+            Robot::new(spawn_positions[7], RobotType::Collector, (-1, 0)),
         ];
 
         let map = Arc::new(map);
