@@ -685,4 +685,73 @@ mod tests {
         assert_eq!(state.robots[0].state, RobotState::ReturningToBase);
         assert!(state.collected_crystals.contains(&(3, 2)));
     }
+
+    #[test]
+    fn test_collector_deposit_at_base() {
+        let map = setup_test_map();
+        let base_pos = (5, 5);
+
+        let mut robot = Robot::new((5, 5), RobotType::Collector, (0, 0));
+        robot.carried_crystals = 3;
+        robot.carried_energy = 2;
+        robot.state = RobotState::ReturningToBase;
+        robot.path = VecDeque::from(vec![(5, 5)]);
+
+        let robots = vec![robot];
+        let mut state = SimulationState::new_test(map, base_pos, robots);
+
+        let mut rng = StdRng::seed_from_u64(1234);
+        state.tick(&mut rng);
+
+        assert_eq!(state.deposited_crystals, 3);
+        assert_eq!(state.deposited_energy, 2);
+        assert_eq!(state.robots[0].carried_crystals, 0);
+        assert_eq!(state.robots[0].carried_energy, 0);
+        assert_eq!(state.robots[0].state, RobotState::Exploring);
+    }
+
+    #[test]
+    fn test_collector_returning_does_not_collect() {
+        // A collector in ReturningToBase should not pick up resources along the way.
+        let mut map = setup_test_map();
+        map[5][4] = 0.2; // crystal at (4,5)
+
+        let base_pos = (5, 5);
+        let mut robot = Robot::new((3, 5), RobotType::Collector, (0, 0));
+        robot.carried_crystals = 1;
+        robot.state = RobotState::ReturningToBase;
+        robot.path = VecDeque::from(vec![(4, 5), (5, 5)]);
+
+        let robots = vec![robot];
+        let mut state = SimulationState::new_test(map, base_pos, robots);
+        state.resource_quantities.insert((4, 5), 50);
+        let mut rng = StdRng::seed_from_u64(1234);
+
+        state.tick(&mut rng);
+
+        // Robot moves to (4,5) but doesn't collect the crystal there
+        assert_eq!(state.robots[0].position, (4, 5));
+        assert_eq!(state.robots[0].carried_crystals, 1);
+        assert!(!state.collected_crystals.contains(&(4, 5)));
+    }
+
+    #[test]
+    fn test_scout_avoids_occupied_positions() {
+        let map = setup_test_map();
+        let base_pos = (5, 5);
+        let mut robot = Robot::new((2, 2), RobotType::Scout, (1, 0));
+        let mut rng = StdRng::seed_from_u64(1234);
+
+        // Block all directions except one
+        let mut occupied = HashSet::new();
+        occupied.insert((3, 2)); // right
+        occupied.insert((1, 2)); // left
+        occupied.insert((2, 1)); // up
+
+        move_scout(&mut robot, &map, 10, 10, base_pos, &mut rng, &occupied);
+
+        // Should move down to (2, 3) — the only unoccupied direction
+        assert_eq!(robot.position, (2, 3));
+    }
 }
+
