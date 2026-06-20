@@ -116,11 +116,10 @@ impl Robot {
 impl App {
     pub fn new(width: usize, height: usize) -> Self {
         let base_pos = (width as u16 / 2, height as u16 / 2);
-
         let map = Self::generate_map(width, height);
-
         let mut resource_quantities = HashMap::new();
         let mut rng = rand::thread_rng();
+
         for y in 0..height as u16 {
             for x in 0..width as u16 {
                 if is_base_cell(x, y, base_pos) || is_obstacle(&map, x, y) {
@@ -128,8 +127,11 @@ impl App {
                 }
 
                 if is_crystal(&map, x, y) || is_energy(&map, x, y) {
-                    let qty = rng.gen_range(50..=200);
-                    resource_quantities.insert((x, y), qty);
+                    // RARIFICATION : Seulement 10% des ressources éligibles sont créées
+                    if rng.gen_bool(0.10) {
+                        let qty = rng.gen_range(50..=200);
+                        resource_quantities.insert((x, y), qty);
+                    }
                 }
             }
         }
@@ -175,8 +177,8 @@ impl App {
 
         let mut tick_senders = Vec::new();
         let mut robot_handles = Vec::new();
-
         let robot_count = state.lock().unwrap().robots.len();
+
         for robot_id in 0..robot_count {
             let (tick_tx, tick_rx) = mpsc::channel();
             tick_senders.push(tick_tx);
@@ -196,7 +198,7 @@ impl App {
             exit: false,
             state,
             last_tick: Instant::now(),
-            tick_rate: Duration::from_millis(100),
+            tick_rate: Duration::from_millis(25), // Simulation rapide
             tick_senders,
             done_receiver,
             stop,
@@ -216,7 +218,7 @@ impl App {
                     .map(|x| {
                         let dx = x as i32 - base_x;
                         let dy = y as i32 - base_y;
-                        if dx.abs().max(dy.abs()) <= 15 {
+                        if dx.abs().max(dy.abs()) <= 3 {
                             0.0
                         } else {
                             perlin.get([x as f64 * scale, y as f64 * scale])
@@ -347,18 +349,23 @@ fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R)
 
             let (rx, ry) = state.robots[robot_id].position;
 
-            if is_crystal(&map, rx, ry)
-                && !state.collected_crystals.contains(&(rx, ry))
-                && !state.discovered_crystals.contains(&(rx, ry))
-            {
-                state.discovered_crystals.insert((rx, ry));
-            }
+            // CORRECTION : Un scout ne peut détecter que si la ressource a réellement été générée
+            if let Some(&qty) = state.resource_quantities.get(&(rx, ry)) {
+                if qty > 0 {
+                    if is_crystal(&map, rx, ry)
+                        && !state.collected_crystals.contains(&(rx, ry))
+                        && !state.discovered_crystals.contains(&(rx, ry))
+                    {
+                        state.discovered_crystals.insert((rx, ry));
+                    }
 
-            if is_energy(&map, rx, ry)
-                && !state.collected_energy.contains(&(rx, ry))
-                && !state.discovered_energy.contains(&(rx, ry))
-            {
-                state.discovered_energy.insert((rx, ry));
+                    if is_energy(&map, rx, ry)
+                        && !state.collected_energy.contains(&(rx, ry))
+                        && !state.discovered_energy.contains(&(rx, ry))
+                    {
+                        state.discovered_energy.insert((rx, ry));
+                    }
+                }
             }
         }
 
@@ -451,7 +458,6 @@ fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R)
                         if *qty > 0 {
                             *qty -= 1;
 
-                            // Utilisation de blocs if/else au lieu d'un match pour discriminer le type
                             if is_crystal(&map, pos.0, pos.1) {
                                 state.robots[robot_id].carried_crystals += 1;
                                 if *qty == 0 {
@@ -471,7 +477,7 @@ fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R)
                     }
 
                     let total_carried = state.robots[robot_id].carried_crystals + state.robots[robot_id].carried_energy;
-                    if total_carried >= 200 || resource_depleted {
+                    if total_carried >= 25 || resource_depleted {
                         let path = bfs(&map, &state.collected_crystals, &state.collected_energy, pos, base_pos, width, height, base_pos);
                         let robot = &mut state.robots[robot_id];
                         robot.path = path;
@@ -487,10 +493,12 @@ fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R)
                     }
 
                     let pos = state.robots[robot_id].position;
-                    if is_crystal(&map, pos.0, pos.1) || is_energy(&map, pos.0, pos.1) {
-                        let robot = &mut state.robots[robot_id];
-                        robot.state = RobotState::Collecting;
-                        robot.path.clear();
+                    if let Some(&qty) = state.resource_quantities.get(&pos) {
+                        if qty > 0 && (is_crystal(&map, pos.0, pos.1) || is_energy(&map, pos.0, pos.1)) {
+                            let robot = &mut state.robots[robot_id];
+                            robot.state = RobotState::Collecting;
+                            robot.path.clear();
+                        }
                     }
                 }
             }
@@ -627,7 +635,7 @@ mod tests {
             for x in 5..=35 {
                 let dx = x as i32 - 20;
                 let dy = y as i32 - 20;
-                if dx.abs().max(dy.abs()) <= 15 {
+                if dx.abs().max(dy.abs()) <= 3 {
                     assert_eq!(map[y][x], 0.0, "Obstacle or resource in safe zone at ({}, {})", x, y);
                 }
             }
@@ -652,8 +660,6 @@ mod tests {
 
     #[test]
     fn test_collector_collecting_state() {
-        // A collector in Collecting state should decrement resource_quantities
-        // and increment carried_crystals each tick.
         let mut map = setup_test_map();
         map[2][3] = 0.2; // crystal tile
         let base_pos = (5, 5);
@@ -667,14 +673,12 @@ mod tests {
 
         let mut rng = StdRng::seed_from_u64(1234);
 
-        // First tick: qty 2 → 1, carried_crystals 0 → 1, still Collecting
         state.tick(&mut rng);
         assert_eq!(state.robots[0].carried_crystals, 1);
         assert_eq!(*state.resource_quantities.get(&(3, 2)).unwrap(), 1);
         assert_eq!(state.robots[0].state, RobotState::Collecting);
         assert!(!state.collected_crystals.contains(&(3, 2)));
 
-        // Second tick: qty 1 → 0, carried_crystals 1 → 2, resource depleted → ReturningToBase
         state.tick(&mut rng);
         assert_eq!(state.robots[0].carried_crystals, 2);
         assert_eq!(*state.resource_quantities.get(&(3, 2)).unwrap(), 0);
@@ -750,3 +754,4 @@ mod tests {
         assert_eq!(robot.position, (2, 3));
     }
 }
+

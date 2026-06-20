@@ -1,5 +1,5 @@
 use crate::app::{RobotType, SimulationState};
-use crate::world::is_base_cell;
+use crate::world::{is_base_cell, is_crystal, is_obstacle};
 use ratatui::prelude::{Rect, Widget};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
@@ -26,11 +26,30 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
             } else if state.collected_energy.contains(&(x as u16, y as u16)) {
                 (" ", Color::DarkGray)
             } else if state.discovered_crystals.contains(&(x as u16, y as u16)) {
-                ("C", Color::LightYellow)
+                ("C", Color::LightYellow) // Ressource découverte
             } else if state.discovered_energy.contains(&(x as u16, y as u16)) {
-                ("E", Color::LightRed)
+                ("E", Color::LightRed)    // Ressource découverte
             } else {
-                render_cell(value)
+                let pos = (x as u16, y as u16);
+
+                if let Some(&qty) = state.resource_quantities.get(&pos) {
+                    if qty > 0 {
+                        if is_crystal(&state.map, pos.0, pos.1) {
+                            ("C", Color::LightMagenta) // Même couleur d'avant (sombre non découverte)
+                        } else {
+                            ("E", Color::Green) // Même couleur d'avant (sombre non découverte)
+                        }
+                    } else {
+                        (" ", Color::DarkGray)
+                    }
+                } else {
+                    // Si elle n'a pas été générée par le dictionnaire, c'est du vide ou un obstacle
+                    if is_obstacle(&state.map, x as u16, y as u16) {
+                        ("0", Color::Cyan)
+                    } else {
+                        (" ", Color::DarkGray)
+                    }
+                }
             };
 
             buf[(area.x + x as u16, area.y + y as u16)]
@@ -80,20 +99,8 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
     }
 }
 
-fn render_cell(value: f64) -> (&'static str, Color) {
-    match value {
-        v if v < -0.1 => ("0", Color::Cyan),
-        v if v < 0.15 => (" ", Color::DarkGray),
-        v if v < 0.30 => ("C", Color::LightMagenta),
-        v if v < 0.45 => (" ", Color::DarkGray),
-        v if v < 0.60 => ("E", Color::Green),
-        _ => (" ", Color::White),
-    }
-}
-
 fn render_base(pos: (u16, u16), area: Rect, buf: &mut ratatui::prelude::Buffer) {
     let tiles: &[(&str, &str, &str)] = &[("#", "#", "#"), ("#", "#", "#"), ("#", "#", "#")];
-
     let base_style = Style::default().fg(Color::Green).bold();
 
     for (row, (left, center, right)) in tiles.iter().enumerate() {
