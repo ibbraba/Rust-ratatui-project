@@ -327,11 +327,253 @@ fn robot_thread_loop(
     }
 }
 
-fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R) {
+/// Tries to find a new BFS path to `target` and moves the robot one step along it.
+/// Returns `true` if a new path was found and the robot advanced.
+fn reroute_path(state: &mut SimulationState, robot_id: usize, target: (u16, u16)) -> bool {
+    let current_pos = state.robots[robot_id].position;
+    let new_path = bfs(
+        &state.map,
+        &state.collected_crystals,
+        &state.collected_energy,
+        current_pos,
+        target,
+        state.width,
+        state.height,
+        state.base_pos,
+    );
+    if !new_path.is_empty() {
+        state.robots[robot_id].path = new_path;
+        if let Some(new_next) = state.robots[robot_id].path.pop_front() {
+            state.robots[robot_id].position = new_next;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Tries to move the robot one cell sideways to avoid a blockage.
+/// Returns `true` if a valid sidestep was found and applied.
+fn step_sideways(
+    state: &mut SimulationState,
+    robot_id: usize,
+    occupied_positions: &HashSet<(u16, u16)>,
+) -> bool {
+    let current_pos = state.robots[robot_id].position;
+    let width = state.width;
+    let height = state.height;
+    let base_pos = state.base_pos;
+    let map = Arc::clone(&state.map);
+
+    for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
+        let nx = (current_pos.0 as i16 + dx).clamp(1, width as i16 - 2) as u16;
+        let ny = (current_pos.1 as i16 + dy).clamp(1, height as i16 - 2) as u16;
+        if !is_obstacle(&map, nx, ny)
+            && !occupied_positions.contains(&(nx, ny))
+            && !is_base_cell(nx, ny, base_pos)
+        {
+            state.robots[robot_id].position = (nx, ny);
+            return true;
+        }
+    }
+    false
+}
+
+/// Deposits all resources the robot is carrying at the base and resets it to `Exploring`.
+fn deposit_resources(state: &mut SimulationState, robot_id: usize) {
+    state.deposited_crystals += state.robots[robot_id].carried_crystals;
+    state.deposited_energy += state.robots[robot_id].carried_energy;
+    state.robots[robot_id].carried_crystals = 0;
+    state.robots[robot_id].carried_energy = 0;
+    state.robots[robot_id].state = RobotState::Exploring;
+}
+
+/// Ticks a Scout robot: moves it and records any newly discovered resources at its position.
+fn tick_scout<R: Rng>(
+    state: &mut SimulationState,
+    robot_id: usize,
+    rng: &mut R,
+    occupied_positions: &HashSet<(u16, u16)>,
+) {
     let map = Arc::clone(&state.map);
     let width = state.width;
     let height = state.height;
     let base_pos = state.base_pos;
+
+    {
+        let robot = &mut state.robots[robot_id];
+        move_scout(robot, &map, width, height, base_pos, rng, occupied_positions);
+    }
+
+    let (rx, ry) = state.robots[robot_id].position;
+
+    // CORRECTION : Un scout ne peut détecter que si la ressource a réellement été générée
+    if let Some(&qty) = state.resource_quantities.get(&(rx, ry)) {
+        if qty > 0 {
+            if is_crystal(&map, rx, ry)
+                && !state.collected_crystals.contains(&(rx, ry))
+                && !state.discovered_crystals.contains(&(rx, ry))
+            {
+                state.discovered_crystals.insert((rx, ry));
+            }
+            if is_energy(&map, rx, ry)
+                && !state.collected_energy.contains(&(rx, ry))
+                && !state.discovered_energy.contains(&(rx, ry))
+            {
+                state.discovered_energy.insert((rx, ry));
+            }
+        }
+    }
+}
+
+/// Ticks a Collector in `MovingToResource` state:
+/// advances along its path, reroutes on collisions, and transitions to `Collecting`
+/// or `Exploring` once the path is exhausted.
+fn tick_collector_moving_to_resource(
+    state: &mut SimulationState,
+    robot_id: usize,
+    occupied_positions: &HashSet<(u16, u16)>,
+) {
+    let next = state.robots[robot_id].path.pop_front();
+    if let Some(next) = next {
+        if occupied_positions.contains(&next) {
+            let target = state.robots[robot_id].path.back().copied().unwrap_or(next);
+            if !reroute_path(state, robot_id, target) {
+                state.robots[robot_id].path.clear();
+                state.robots[robot_id].state = RobotState::Exploring;
+            }
+        } else {
+            state.robots[robot_id].position = next;
+        }
+    }
+
+    if state.robots[robot_id].path.is_empty()
+        && state.robots[robot_id].state == RobotState::MovingToResource
+    {
+        let pos = state.robots[robot_id].position;
+        let qty = state.resource_quantities.get(&pos).copied().unwrap_or(0);
+        state.robots[robot_id].state = if qty > 0 {
+            RobotState::Collecting
+        } else {
+            RobotState::Exploring
+        };
+    }
+}
+
+/// Ticks a Collector in `ReturningToBase` state:
+/// advances toward the base, reroutes on collisions (with sideways fallback),
+/// and deposits resources upon arrival.
+fn tick_collector_returning_to_base(
+    state: &mut SimulationState,
+    robot_id: usize,
+    occupied_positions: &HashSet<(u16, u16)>,
+) {
+    let base_pos = state.base_pos;
+    let next = state.robots[robot_id].path.pop_front();
+
+    if let Some(next) = next {
+        if occupied_positions.contains(&next) && next != base_pos {
+            if !reroute_path(state, robot_id, base_pos) {
+                // BFS failed: try a sideways step, otherwise wait in place
+                if !step_sideways(state, robot_id, occupied_positions) {
+                    state.robots[robot_id].path.push_front(next);
+                }
+            }
+        } else {
+            state.robots[robot_id].position = next;
+            if next == base_pos {
+                deposit_resources(state, robot_id);
+            }
+        }
+    } else {
+        state.robots[robot_id].state = RobotState::Exploring;
+    }
+}
+
+/// Ticks a Collector in `Collecting` state:
+/// extracts one unit of resource per tick, marks depleted tiles,
+/// and triggers a return to base when the robot is full or the resource runs out.
+fn tick_collector_collecting(state: &mut SimulationState, robot_id: usize) {
+    let pos = state.robots[robot_id].position;
+    let map = Arc::clone(&state.map);
+    let base_pos = state.base_pos;
+    let width = state.width;
+    let height = state.height;
+    let mut resource_depleted = false;
+
+    if let Some(qty) = state.resource_quantities.get_mut(&pos) {
+        if *qty > 0 {
+            *qty -= 1;
+            if is_crystal(&map, pos.0, pos.1) {
+                state.robots[robot_id].carried_crystals += 1;
+                if *qty == 0 {
+                    resource_depleted = true;
+                    state.collected_crystals.insert(pos);
+                }
+            } else if is_energy(&map, pos.0, pos.1) {
+                state.robots[robot_id].carried_energy += 1;
+                if *qty == 0 {
+                    resource_depleted = true;
+                    state.collected_energy.insert(pos);
+                }
+            }
+        } else {
+            resource_depleted = true;
+        }
+    }
+
+    let total_carried =
+        state.robots[robot_id].carried_crystals + state.robots[robot_id].carried_energy;
+    if total_carried >= 25 || resource_depleted {
+        let path = bfs(
+            &map,
+            &state.collected_crystals,
+            &state.collected_energy,
+            pos,
+            base_pos,
+            width,
+            height,
+            base_pos,
+        );
+        let robot = &mut state.robots[robot_id];
+        robot.path = path;
+        robot.state = RobotState::ReturningToBase;
+    }
+}
+
+/// Ticks a Collector in any other state (Idle / Exploring):
+/// moves it like a Scout and immediately switches to `Collecting`
+/// if it lands on a resource tile.
+fn tick_collector_exploring<R: Rng>(
+    state: &mut SimulationState,
+    robot_id: usize,
+    rng: &mut R,
+    occupied_positions: &HashSet<(u16, u16)>,
+) {
+    let map = Arc::clone(&state.map);
+    let width = state.width;
+    let height = state.height;
+    let base_pos = state.base_pos;
+
+    {
+        let robot = &mut state.robots[robot_id];
+        robot.state = RobotState::Exploring;
+        move_scout(robot, &map, width, height, base_pos, rng, occupied_positions);
+    }
+
+    let pos = state.robots[robot_id].position;
+    if let Some(&qty) = state.resource_quantities.get(&pos) {
+        if qty > 0 && (is_crystal(&map, pos.0, pos.1) || is_energy(&map, pos.0, pos.1)) {
+            let robot = &mut state.robots[robot_id];
+            robot.state = RobotState::Collecting;
+            robot.path.clear();
+        }
+    }
+}
+
+/// Dispatches one simulation tick for the given robot to the appropriate handler
+/// based on its type and current state.
+fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R) {
     let robot_type = state.robots[robot_id].robot_type;
 
     let occupied_positions: HashSet<(u16, u16)> = state.robots.iter()
@@ -341,166 +583,18 @@ fn tick_robot<R: Rng>(state: &mut SimulationState, robot_id: usize, rng: &mut R)
         .collect();
 
     match robot_type {
-        RobotType::Scout => {
-            {
-                let robot = &mut state.robots[robot_id];
-                move_scout(robot, &map, width, height, base_pos, rng, &occupied_positions);
-            }
-
-            let (rx, ry) = state.robots[robot_id].position;
-
-            // CORRECTION : Un scout ne peut détecter que si la ressource a réellement été générée
-            if let Some(&qty) = state.resource_quantities.get(&(rx, ry)) {
-                if qty > 0 {
-                    if is_crystal(&map, rx, ry)
-                        && !state.collected_crystals.contains(&(rx, ry))
-                        && !state.discovered_crystals.contains(&(rx, ry))
-                    {
-                        state.discovered_crystals.insert((rx, ry));
-                    }
-
-                    if is_energy(&map, rx, ry)
-                        && !state.collected_energy.contains(&(rx, ry))
-                        && !state.discovered_energy.contains(&(rx, ry))
-                    {
-                        state.discovered_energy.insert((rx, ry));
-                    }
-                }
-            }
-        }
-
+        RobotType::Scout => tick_scout(state, robot_id, rng, &occupied_positions),
         RobotType::Collector => {
             let current_state = state.robots[robot_id].state;
-
             match current_state {
                 RobotState::MovingToResource => {
-                    let next = state.robots[robot_id].path.pop_front();
-                    if let Some(next) = next {
-                        if occupied_positions.contains(&next) {
-                            let target = state.robots[robot_id].path.back().copied().unwrap_or(next);
-                            let current_pos = state.robots[robot_id].position;
-
-                            let new_path = bfs(&map, &state.collected_crystals, &state.collected_energy, current_pos, target, width, height, base_pos);
-
-                            if !new_path.is_empty() {
-                                state.robots[robot_id].path = new_path;
-                                if let Some(new_next) = state.robots[robot_id].path.pop_front() {
-                                    state.robots[robot_id].position = new_next;
-                                }
-                            } else {
-                                state.robots[robot_id].path.clear();
-                                state.robots[robot_id].state = RobotState::Exploring;
-                            }
-                        } else {
-                            state.robots[robot_id].position = next;
-                        }
-                    }
-
-                    if state.robots[robot_id].path.is_empty() && state.robots[robot_id].state == RobotState::MovingToResource {
-                        let pos = state.robots[robot_id].position;
-                        let qty = state.resource_quantities.get(&pos).copied().unwrap_or(0);
-                        if qty > 0 {
-                            state.robots[robot_id].state = RobotState::Collecting;
-                        } else {
-                            state.robots[robot_id].state = RobotState::Exploring;
-                        }
-                    }
+                    tick_collector_moving_to_resource(state, robot_id, &occupied_positions)
                 }
-
                 RobotState::ReturningToBase => {
-                    let next = state.robots[robot_id].path.pop_front();
-                    if let Some(next) = next {
-                        if occupied_positions.contains(&next) && next != base_pos {
-                            let current_pos = state.robots[robot_id].position;
-                            let new_path = bfs(&map, &state.collected_crystals, &state.collected_energy, current_pos, base_pos, width, height, base_pos);
-
-                            if !new_path.is_empty() {
-                                state.robots[robot_id].path = new_path;
-                                if let Some(new_next) = state.robots[robot_id].path.pop_front() {
-                                    state.robots[robot_id].position = new_next;
-                                }
-                            } else {
-                                let mut pas_de_cote = false;
-                                for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
-                                    let nx = (current_pos.0 as i16 + dx).clamp(1, width as i16 - 2) as u16;
-                                    let ny = (current_pos.1 as i16 + dy).clamp(1, height as i16 - 2) as u16;
-
-                                    if !is_obstacle(&map, nx, ny) && !occupied_positions.contains(&(nx, ny)) && !is_base_cell(nx, ny, base_pos) {
-                                        state.robots[robot_id].position = (nx, ny);
-                                        pas_de_cote = true;
-                                        break;
-                                    }
-                                }
-                                if !pas_de_cote {
-                                    state.robots[robot_id].path.push_front(next);
-                                }
-                            }
-                        } else {
-                            state.robots[robot_id].position = next;
-                            if next == base_pos {
-                                state.deposited_crystals += state.robots[robot_id].carried_crystals;
-                                state.deposited_energy += state.robots[robot_id].carried_energy;
-                                state.robots[robot_id].carried_crystals = 0;
-                                state.robots[robot_id].carried_energy = 0;
-                                state.robots[robot_id].state = RobotState::Exploring;
-                            }
-                        }
-                    } else {
-                        state.robots[robot_id].state = RobotState::Exploring;
-                    }
+                    tick_collector_returning_to_base(state, robot_id, &occupied_positions)
                 }
-
-                RobotState::Collecting => {
-                    let pos = state.robots[robot_id].position;
-                    let mut resource_depleted = false;
-
-                    if let Some(qty) = state.resource_quantities.get_mut(&pos) {
-                        if *qty > 0 {
-                            *qty -= 1;
-
-                            if is_crystal(&map, pos.0, pos.1) {
-                                state.robots[robot_id].carried_crystals += 1;
-                                if *qty == 0 {
-                                    resource_depleted = true;
-                                    state.collected_crystals.insert(pos);
-                                }
-                            } else if is_energy(&map, pos.0, pos.1) {
-                                state.robots[robot_id].carried_energy += 1;
-                                if *qty == 0 {
-                                    resource_depleted = true;
-                                    state.collected_energy.insert(pos);
-                                }
-                            }
-                        } else {
-                            resource_depleted = true;
-                        }
-                    }
-
-                    let total_carried = state.robots[robot_id].carried_crystals + state.robots[robot_id].carried_energy;
-                    if total_carried >= 25 || resource_depleted {
-                        let path = bfs(&map, &state.collected_crystals, &state.collected_energy, pos, base_pos, width, height, base_pos);
-                        let robot = &mut state.robots[robot_id];
-                        robot.path = path;
-                        robot.state = RobotState::ReturningToBase;
-                    }
-                }
-
-                _ => {
-                    {
-                        let robot = &mut state.robots[robot_id];
-                        robot.state = RobotState::Exploring;
-                        move_scout(robot, &map, width, height, base_pos, rng, &occupied_positions);
-                    }
-
-                    let pos = state.robots[robot_id].position;
-                    if let Some(&qty) = state.resource_quantities.get(&pos) {
-                        if qty > 0 && (is_crystal(&map, pos.0, pos.1) || is_energy(&map, pos.0, pos.1)) {
-                            let robot = &mut state.robots[robot_id];
-                            robot.state = RobotState::Collecting;
-                            robot.path.clear();
-                        }
-                    }
-                }
+                RobotState::Collecting => tick_collector_collecting(state, robot_id),
+                _ => tick_collector_exploring(state, robot_id, rng, &occupied_positions),
             }
         }
     }
