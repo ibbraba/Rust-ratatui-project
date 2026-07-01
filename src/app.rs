@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyEventKind;
+use crossterm::event::{KeyCode, KeyEventKind};
 use noise::{NoiseFn, Perlin};
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -33,6 +33,8 @@ pub(crate) struct SimulationState {
     pub(crate) discovered_crystals: HashSet<(u16, u16)>,
     pub(crate) discovered_energy: HashSet<(u16, u16)>,
     pub(crate) resource_quantities: HashMap<(u16, u16), u32>,
+    pub(crate) paused: bool,
+    pub(crate) mission_complete: bool,
 }
 
 pub(crate) struct App {
@@ -138,6 +140,8 @@ impl App {
             discovered_crystals: HashSet::new(),
             discovered_energy: HashSet::new(),
             resource_quantities,
+            paused: false,
+            mission_complete: false,
         }));
 
         let mut tick_senders = Vec::new();
@@ -210,7 +214,7 @@ impl App {
                 }
             }
 
-            if self.last_tick.elapsed() >= self.tick_rate {
+            if self.should_tick() && self.last_tick.elapsed() >= self.tick_rate {
                 self.signal_robot_tick();
                 self.last_tick = Instant::now();
             }
@@ -221,6 +225,10 @@ impl App {
     }
 
     fn signal_robot_tick(&self) {
+        if !self.should_tick() {
+            return;
+        }
+
         let robot_count = self.tick_senders.len();
 
         for tx in &self.tick_senders {
@@ -233,7 +241,30 @@ impl App {
 
         if let Ok(mut state) = self.state.lock() {
             assign_collectors(&mut state);
+            if self.is_mission_complete(&state) {
+                state.paused = true;
+                state.mission_complete = true;
+            }
         }
+    }
+
+    fn should_tick(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| !state.paused && !state.mission_complete)
+            .unwrap_or(false)
+    }
+
+    fn is_mission_complete(&self, state: &SimulationState) -> bool {
+        let collected = state.collected_crystals.len() + state.collected_energy.len();
+        let total_resources = state.resource_quantities.len();
+
+        collected == total_resources
+            && state.robots.iter().all(|robot| {
+                robot.carried_crystals == 0
+                    && robot.carried_energy == 0
+                    && robot.path.is_empty()
+            })
     }
 
     fn shutdown(&mut self) {
@@ -254,7 +285,22 @@ impl App {
 
     fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) -> io::Result<()> {
         if key_event.kind == KeyEventKind::Press {
-            self.exit = true;
+            match key_event.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.exit = true;
+                }
+                KeyCode::Char('p') => {
+                    if let Ok(mut state) = self.state.lock() {
+                        if !state.mission_complete {
+                            state.paused = !state.paused;
+                            if !state.paused {
+                                self.last_tick = Instant::now();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

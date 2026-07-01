@@ -41,15 +41,40 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
 
     render_base(state.base_pos, area, buf);
 
-    Line::from("Robots Game — Appuyez sur n'importe quelle touche pour quitter")
+    let header = if state.mission_complete {
+        "Mission accomplie - appuyez sur q pour quitter"
+    } else if state.paused {
+        "Simulation en pause - p pour reprendre, q pour quitter"
+    } else {
+        "Robots Game - p pour pause, q pour quitter"
+    };
+
+    Line::from(header)
         .bold()
         .yellow()
         .render(area, buf);
 
+    let controls = Line::from("Éclaireurs: découverte  |  Collecteurs: extraction et dépôt  |  Esc: quitter")
+        .dim()
+        .light_blue();
+
+    let controls_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: 1,
+    };
+
+    controls.render(controls_area, buf);
+
+    let collected_total = state.collected_crystals.len() + state.collected_energy.len();
+    let total_resources = state.resource_quantities.len();
     let summary = format!(
-        " Cristaux collectés: {}  |  Énergie collectée: {}  |  Cristaux découverts: {}  |  Énergie découverte: {} ",
+        " Déposés: {} cristaux / {} énergie  |  Collectés: {}/{}  |  Découverts: {} cristaux / {} énergie ",
         state.deposited_crystals,
         state.deposited_energy,
+        collected_total,
+        total_resources,
         state.discovered_crystals.len(),
         state.discovered_energy.len(),
     );
