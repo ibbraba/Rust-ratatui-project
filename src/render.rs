@@ -19,8 +19,6 @@ pub(crate) fn render_world(state: &SimulationState, area: Rect, buf: &mut ratatu
                 continue;
             }
 
-            let value = state.map[y][x];
-
             let (symbol, color) = if state.collected_crystals.contains(&(x as u16, y as u16)) {
                 (" ", Color::DarkGray)
             } else if state.collected_energy.contains(&(x as u16, y as u16)) {

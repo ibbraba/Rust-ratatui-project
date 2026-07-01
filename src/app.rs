@@ -36,6 +36,7 @@ pub(crate) struct SimulationState {
 }
 
 impl SimulationState {
+    #[cfg(test)]
     pub(crate) fn new_test(map: Vec<Vec<f64>>, base_pos: (u16, u16), robots: Vec<Robot>) -> Self {
         let width = map[0].len();
         let height = map.len();
@@ -55,6 +56,7 @@ impl SimulationState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn tick(&mut self, rng: &mut impl Rng) {
         for robot_id in 0..self.robots.len() {
             tick_robot(self, robot_id, rng);
@@ -86,7 +88,6 @@ pub(crate) enum RobotState {
     MovingToResource,
     Collecting,
     ReturningToBase,
-    Idle,
 }
 
 pub(crate) struct Robot {
